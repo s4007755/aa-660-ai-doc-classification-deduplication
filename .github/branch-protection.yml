@@ -1,0 +1,32 @@
+branch_protection_rules:
+  - name: main
+    pattern: main
+    require_pull_request: true
+    required_approvals: 1
+    require_status_checks: false
+    restrict_pushes: true
+    require_conversation_resolution: true
+
+  - name: develop
+    pattern: develop
+    require_pull_request: true
+    required_approvals: 1
+    require_status_checks: false
+    restrict_pushes: true
+    require_conversation_resolution: true
+
+  - name: release/*
+    pattern: release/*
+    require_pull_request: true
+    required_approvals: 1
+    require_status_checks: false
+    restrict_pushes: true
+    require_conversation_resolution: true
+
+  - name: hotfix/*
+    pattern: hotfix/*
+    require_pull_request: true
+    required_approvals: 1
+    require_status_checks: false
+    restrict_pushes: true
+    require_conversation_resolution: true

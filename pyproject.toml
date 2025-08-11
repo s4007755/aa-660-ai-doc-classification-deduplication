@@ -1,0 +1,58 @@
+[project]
+name = "aa660-doc-ai"
+version = "0.1.0"
+description = "Prototype pipelines for document classification and duplicate/near-duplicate detection (AA-660, RMIT x Search Sensei)"
+authors = [
+    { name = "AA-660 Team", email = "team@example.com" }
+]
+requires-python = ">=3.10"
+
+dependencies = [
+    # API & web server
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.6.0",
+
+    # Data handling
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "scikit-learn>=1.4.0",
+
+    # NLP & similarity
+    "sentence-transformers>=2.5.0",
+    "hdbscan>=0.8.33",
+    "datasketch>=1.5.0",
+
+    # Document parsing
+    "pymupdf>=1.23.0",         # PDFs
+    "python-docx>=1.1.0",      # DOCX
+    "trafilatura>=1.9.0",      # HTML extraction
+
+    # Testing
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.4.0",
+    "isort>=5.13.0",
+    "ruff>=0.5.0",
+    "pre-commit>=3.7.0"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "B", "I", "UP"]

@@ -1,4 +1,5 @@
 import sqlite3
+import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -6,6 +7,7 @@ DB_PATH = Path("data/db/docstore.sqlite")
 
 
 def get_conn() -> sqlite3.Connection:
+    # Open DB and enable FK
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -13,6 +15,7 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db():
+    # Create tables and indexes
     conn = get_conn()
     cur = conn.cursor()
     cur.executescript(
@@ -73,6 +76,7 @@ def init_db():
 
 
 def upsert_document(doc_id: str, raw_text: str, normalized_text: str, meta: Dict[str, Any]):
+    # Insert/update a document row
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -94,6 +98,7 @@ def upsert_document(doc_id: str, raw_text: str, normalized_text: str, meta: Dict
 
 
 def add_file_mapping(doc_id: str, filepath: str, mtime_ns: Optional[int]):
+    # Map a file path to a document
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -110,6 +115,7 @@ def add_file_mapping(doc_id: str, filepath: str, mtime_ns: Optional[int]):
 
 
 def mark_dirty(doc_ids: List[str]):
+    # Mark documents as needing re-normalization
     if not doc_ids:
         return
     conn = get_conn()
@@ -123,6 +129,7 @@ def mark_dirty(doc_ids: List[str]):
 
 
 def delete_documents(doc_ids: List[str]):
+    # Delete documents and cascading file mappings
     if not doc_ids:
         return
     conn = get_conn()
@@ -133,6 +140,7 @@ def delete_documents(doc_ids: List[str]):
 
 
 def insert_cluster(config: str, members: List[str], pairwise: List[Tuple[str, str, float, float, float]]) -> int:
+    # Insert a cluster with members and pairwise scores
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT INTO clusters (config) VALUES (?)", (config,))
@@ -154,6 +162,7 @@ def insert_cluster(config: str, members: List[str], pairwise: List[Tuple[str, st
 
 
 def get_all_documents() -> List[Dict[str, Any]]:
+    # Return one row per document with aggregated filepaths
     conn = get_conn()
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -179,8 +188,9 @@ def get_all_documents() -> List[Dict[str, Any]]:
             results[doc_id]["filepaths"].append(r["filepath"])
     return list(results.values())
 
-# Returns (doc_id, normalized_text) for all docs.
+
 def get_docs_text(include_dirty: bool = False) -> List[Tuple[str, str]]:
+    # Return (doc_id, normalized_text) for all docs
     conn = get_conn()
     cur = conn.cursor()
     if include_dirty:
@@ -196,8 +206,9 @@ def get_docs_text(include_dirty: bool = False) -> List[Tuple[str, str]]:
     conn.close()
     return [(r[0], r[1]) for r in rows]
 
-# Returns (doc_id, normalized_text) for provided doc_ids.
+
 def get_docs_text_by_ids(doc_ids: List[str], include_dirty: bool = False) -> List[Tuple[str, str]]:
+    # Return (doc_id, normalized_text) for specific doc_ids
     if not doc_ids:
         return []
     conn = get_conn()
@@ -220,3 +231,37 @@ def get_docs_text_by_ids(doc_ids: List[str], include_dirty: bool = False) -> Lis
     rows = cur.execute(sql, doc_ids).fetchall()
     conn.close()
     return [(r[0], r[1]) for r in rows]
+
+
+def get_all_document_files() -> List[Dict[str, Any]]:
+    # Return one row per mapped file (for the Documents tab)
+    conn = get_conn()
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+            d.doc_id,
+            d.language,
+            d.filesize,
+            f.filepath,
+            f.mtime_ns
+        FROM documents d
+        JOIN document_files f ON d.doc_id = f.doc_id
+        ORDER BY d.updated_at DESC, f.filepath ASC
+        """
+    ).fetchall()
+    conn.close()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        fp = r["filepath"] or ""
+        out.append({
+            "doc_id": r["doc_id"],
+            "language": r["language"],
+            "filesize": r["filesize"],
+            "filepath": fp,
+            "filename": os.path.basename(fp) if fp else "",
+            "mtime_ns": r["mtime_ns"],
+        })
+    return out

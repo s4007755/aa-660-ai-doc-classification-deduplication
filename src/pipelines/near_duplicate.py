@@ -16,7 +16,7 @@ from src.learners.base import (
     LearnerConfig,
     CorpusStats,
 )
-from src.learners.simhash_model import SimhashLearner
+from src.learners.simhash_model import SimHashLearner as SimhashLearner
 from src.learners.minhash_model import MinHashLearner
 from src.learners.embed_model import EmbeddingLearner
 from src.ensemble.arbiter import Arbiter, ArbiterConfig, DecisionTrace

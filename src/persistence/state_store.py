@@ -360,3 +360,47 @@ def run_stats(run_id: int) -> Dict[str, Any]:
         "consensus_rate": float(consensus_rate),
         "escalations_pct": float(escalations_pct),
     }
+
+# compatibility + init
+def init_db() -> None:
+    ensure_state_schema()
+
+def get_run_config(run_id: int) -> Optional[Dict[str, Any]]:
+    row = get_run(run_id)
+    if not row or not row.get("config_json"):
+        return None
+    try:
+        return json.loads(row["config_json"])
+    except Exception:
+        return None
+
+def get_calibrations_for_run(run_id: int) -> List[Dict[str, Any]]:
+    rows = get_calibrations(run_id)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "learner_name": r["learner_name"],
+            "method": r["method"],
+            "params": json.loads(r.get("params_json") or "{}"),
+            "reliability": json.loads(r.get("reliability_json") or "[]"),
+        })
+    return out
+
+def list_decisions(run_id: int, limit: int = 500) -> List[Dict[str, Any]]:
+    rows = get_decisions(run_id, limit=limit, offset=0)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            trace = json.loads(r["trace_json"]) if r.get("trace_json") else None
+        except Exception:
+            trace = None
+        out.append({
+            "pair_key": r["pair_key"],
+            "doc1": r["doc1"],
+            "doc2": r["doc2"],
+            "final_label": r["final_label"],
+            "consensus": r["consensus"] or "",
+            "trace": trace,
+        })
+    return out
+

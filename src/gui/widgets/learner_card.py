@@ -1,9 +1,7 @@
 # src/gui/widgets/learner_card.py
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any, Callable, Dict, Optional
-
 import tkinter as tk
 from tkinter import ttk
 
@@ -17,27 +15,41 @@ class LearnerCard(ttk.Frame):
         master,
         *,
         learner_name: str,
-        kind: str,
-        config: LearnerConfig,
+        kind: Optional[str] = None,
+        config: Optional[LearnerConfig] = None,
         on_change: _ON_CHANGE = None,
         collapsed: bool = True,
+        show_min_conf: bool = True,
+        text: Optional[str] = None,
+        **kwargs,
     ):
         super().__init__(master, padding=8)
         self.learner_name = learner_name
-        self.kind = kind.lower().strip()
+        inferred = (learner_name or "").strip().lower()
+        if inferred in ("simhash", "minhash", "embedding"):
+            inferred_kind = inferred
+        else:
+            inferred_kind = (kind or "simhash").strip().lower()
+        self.kind = inferred_kind
         self._on_change = on_change
+        self._desc_text = text
+        self._show_min_conf = bool(show_min_conf)
+
+        cfg = config or LearnerConfig()
 
         # control vars
-        self.var_enabled = tk.BooleanVar(value=config.enabled)
-        self.var_target_precision = tk.DoubleVar(value=float(config.target_precision))
-        self.var_use_min_conf = tk.BooleanVar(value=(config.min_confidence is not None))
-        self.var_min_conf = tk.DoubleVar(value=float(config.min_confidence or 0.0))
-        self.var_max_pairs = tk.IntVar(value=int(config.max_pairs_per_epoch))
-        self.var_random_state = tk.IntVar(value=int(config.random_state))
+        self.var_enabled = tk.BooleanVar(value=cfg.enabled)
+        self.var_target_precision = tk.DoubleVar(value=float(cfg.target_precision))
+        self.var_use_min_conf = tk.BooleanVar(value=(cfg.min_confidence is not None))
+        self.var_min_conf = tk.DoubleVar(value=float(cfg.min_confidence or 0.0))
+        self.var_max_pairs = tk.IntVar(value=int(cfg.max_pairs_per_epoch))
+        self.var_random_state = tk.IntVar(value=int(cfg.random_state))
 
         # extras map
-        extras = dict(config.extras or {})
+        extras = dict(cfg.extras or {})
         self.extras_vars: Dict[str, tk.Variable] = {}
+        self.min_conf_entry: Optional[ttk.Entry] = None
+
         self._create_widgets(extras, collapsed)
 
         # wire generic change listeners
@@ -50,8 +62,11 @@ class LearnerCard(ttk.Frame):
         # header
         header = ttk.Frame(self)
         header.pack(fill=tk.X)
+
         ttk.Checkbutton(header, text=self.learner_name, variable=self.var_enabled).pack(side=tk.LEFT)
         ttk.Label(header, text=f"({self.kind})", foreground="#666").pack(side=tk.LEFT, padx=(6, 0))
+        if self._desc_text:
+            ttk.Label(header, text=self._desc_text, foreground="#888").pack(side=tk.LEFT, padx=(8, 0))
 
         # calibration snapshot
         self._calib = {
@@ -70,20 +85,26 @@ class LearnerCard(ttk.Frame):
 
         row = 0
         ttk.Label(core, text="Target precision").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        ttk.Scale(core, from_=0.90, to=0.999, variable=self.var_target_precision, command=lambda *_: self._sync_scale_label(tp_lbl)).grid(row=row, column=1, sticky="we", padx=6)
         tp_lbl = ttk.Label(core, text=f"{self.var_target_precision.get():.3f}")
+        ttk.Scale(core, from_=0.90, to=0.999, variable=self.var_target_precision,
+                  command=lambda *_: self._sync_scale_label(tp_lbl)).grid(row=row, column=1, sticky="we", padx=6)
         tp_lbl.grid(row=row, column=2, sticky="e", padx=6)
 
-        row += 1
-        ttk.Label(core, text="Min confidence").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        use_mc = ttk.Checkbutton(core, variable=self.var_use_min_conf, command=self._toggle_min_conf)
-        use_mc.grid(row=row, column=1, sticky="w", padx=(6, 2))
-        self.min_conf_entry = ttk.Entry(core, width=8, textvariable=self.var_min_conf, state=("normal" if self.var_use_min_conf.get() else "disabled"))
-        self.min_conf_entry.grid(row=row, column=2, sticky="e", padx=6)
+        # Min confidence row (optional)
+        if self._show_min_conf:
+            row += 1
+            ttk.Label(core, text="Min confidence").grid(row=row, column=0, sticky="w", padx=6, pady=4)
+            use_mc = ttk.Checkbutton(core, variable=self.var_use_min_conf, command=self._toggle_min_conf)
+            use_mc.grid(row=row, column=1, sticky="w", padx=(6, 2))
+            self.min_conf_entry = ttk.Entry(core, width=8, textvariable=self.var_min_conf,
+                                            state=("normal" if self.var_use_min_conf.get() else "disabled"))
+            self.min_conf_entry.grid(row=row, column=2, sticky="e", padx=6)
 
+        # Max pairs / Random state
         row += 1
         ttk.Label(core, text="Max pairs/epoch").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(core, from_=1, to=10_000_000, increment=100, width=12, textvariable=self.var_max_pairs).grid(row=row, column=1, sticky="w", padx=6)
+        ttk.Spinbox(core, from_=1, to=10_000_000, increment=100, width=12,
+                    textvariable=self.var_max_pairs).grid(row=row, column=1, sticky="w", padx=6)
         ttk.Label(core, text="Random state").grid(row=row, column=2, sticky="e", padx=6)
         ttk.Entry(core, width=8, textvariable=self.var_random_state).grid(row=row, column=3, sticky="e", padx=6)
 
@@ -94,7 +115,8 @@ class LearnerCard(ttk.Frame):
         adv_frame = ttk.Frame(self)
         adv_header = ttk.Frame(adv_frame)
         adv_header.pack(fill=tk.X)
-        self._adv_btn = ttk.Button(adv_header, text=("Show advanced ▸" if collapsed else "Hide advanced ▾"), command=self._toggle_advanced)
+        self._adv_btn = ttk.Button(adv_header, text=("Show advanced ▸" if collapsed else "Hide advanced ▾"),
+                                   command=self._toggle_advanced)
         self._adv_btn.pack(side=tk.LEFT)
         self._adv_body = ttk.LabelFrame(adv_frame, text="Advanced")
         if not collapsed:
@@ -105,7 +127,6 @@ class LearnerCard(ttk.Frame):
         self._build_extras(self._adv_body, extras)
 
     def _build_extras(self, parent: ttk.LabelFrame, extras: Dict[str, Any]):
-        # helpers
         def add_row(r: int, label: str, var: tk.Variable, widget: tk.Widget):
             ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=6, pady=4)
             widget.grid(row=r, column=1, sticky="we", padx=6)
@@ -147,7 +168,7 @@ class LearnerCard(ttk.Frame):
             return
         thr = cal.threshold if cal.threshold is not None else float("nan")
         brier = cal.brier_score if cal.brier_score is not None else float("nan")
-        self._calib["precision"].configure(text=f"est. precision: target")  # shown as target; true est can be computed elsewhere
+        self._calib["precision"].configure(text=f"est. precision: target")
         self._calib["threshold"].configure(text=f"thr: {thr:.3f}")
         self._calib["brier"].configure(text=("brier: —" if (brier != brier) else f"brier: {brier:.3f}"))
 
@@ -155,7 +176,7 @@ class LearnerCard(ttk.Frame):
     def get_config(self) -> LearnerConfig:
         extras = {k: self._coerce_var(v) for k, v in self.extras_vars.items()}
         min_conf: Optional[float] = None
-        if self.var_use_min_conf.get():
+        if self._show_min_conf and self.var_use_min_conf.get():
             min_conf = float(self.var_min_conf.get())
         cfg = LearnerConfig(
             enabled=bool(self.var_enabled.get()),
@@ -170,7 +191,7 @@ class LearnerCard(ttk.Frame):
     def set_config(self, cfg: LearnerConfig) -> None:
         self.var_enabled.set(bool(cfg.enabled))
         self.var_target_precision.set(float(cfg.target_precision))
-        self.var_use_min_conf.set(cfg.min_confidence is not None)
+        self.var_use_min_conf.set((cfg.min_confidence is not None) if self._show_min_conf else False)
         self.var_min_conf.set(float(cfg.min_confidence or 0.0))
         self.var_max_pairs.set(int(cfg.max_pairs_per_epoch))
         self.var_random_state.set(int(cfg.random_state))
@@ -188,8 +209,9 @@ class LearnerCard(ttk.Frame):
             self._adv_btn.configure(text="Hide advanced ▾")
 
     def _toggle_min_conf(self):
-        state = ("normal" if self.var_use_min_conf.get() else "disabled")
-        self.min_conf_entry.configure(state=state)
+        state = ("normal" if (self._show_min_conf and self.var_use_min_conf.get()) else "disabled")
+        if self.min_conf_entry is not None:
+            self.min_conf_entry.configure(state=state)
 
     def _sync_scale_label(self, lbl: ttk.Label):
         lbl.configure(text=f"{self.var_target_precision.get():.3f}")
@@ -229,31 +251,29 @@ class LearnerCard(ttk.Frame):
     def _set_extras(self, extras: Dict[str, Any]):
         keys = self._known_extra_keys()
         if len(self.extras_vars) == len(keys):
-            for (k, var), name in zip(self.extras_vars.items(), keys):
+            for (k, var), name in zip(list(self.extras_vars.items()), keys):
                 self.extras_vars[name] = self.extras_vars.pop(k)
-        # set values
         for k in keys:
             if k in self.extras_vars:
                 v = extras.get(k)
-                if isinstance(self.extras_vars[k], tk.IntVar) and v is not None:
-                    self.extras_vars[k].set(int(v))
-                elif isinstance(self.extras_vars[k], tk.DoubleVar) and v is not None:
-                    self.extras_vars[k].set(float(v))
-                elif isinstance(self.extras_vars[k], tk.BooleanVar) and v is not None:
-                    self.extras_vars[k].set(bool(v))
-                elif isinstance(self.extras_vars[k], tk.StringVar) and v is not None:
-                    self.extras_vars[k].set(str(v))
+                try:
+                    if isinstance(self.extras_vars[k], tk.IntVar) and v is not None:
+                        self.extras_vars[k].set(int(v))
+                    elif isinstance(self.extras_vars[k], tk.DoubleVar) and v is not None:
+                        self.extras_vars[k].set(float(v))
+                    elif isinstance(self.extras_vars[k], tk.BooleanVar) and v is not None:
+                        self.extras_vars[k].set(bool(v))
+                    elif isinstance(self.extras_vars[k], tk.StringVar) and v is not None:
+                        self.extras_vars[k].set(str(v))
+                except Exception:
+                    pass
 
     def _coerce_var(self, var: tk.Variable) -> Any:
         try:
-            if isinstance(var, tk.IntVar):
-                return int(var.get())
-            if isinstance(var, tk.DoubleVar):
-                return float(var.get())
-            if isinstance(var, tk.BooleanVar):
-                return bool(var.get())
-            if isinstance(var, tk.StringVar):
-                return str(var.get())
+            if isinstance(var, tk.IntVar): return int(var.get())
+            if isinstance(var, tk.DoubleVar): return float(var.get())
+            if isinstance(var, tk.BooleanVar): return bool(var.get())
+            if isinstance(var, tk.StringVar): return str(var.get())
         except Exception:
             pass
         return var.get()

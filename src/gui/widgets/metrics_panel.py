@@ -2,48 +2,64 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 
 class MetricsPanel(ttk.Frame):
+    """
+    Compatible Metrics panel for app.py.
+
+    Supports:
+      - set_snapshot(snapshot_dict)
+      - set_history(list_of_snapshots)
+      - update_metrics(run_summary=..., snapshot=...)  # backward-friendly
+
+    Expects the current snapshot shape from src/metrics/metrics.py::metrics_snapshot():
+      {
+        "run": {...},
+        "per_learner": {...},
+        "clusters": [...]
+      }
+    But also tolerates older / alternate key names.
+    """
+
     def __init__(self, master, *, text: str = "Metrics"):
         super().__init__(master, padding=8)
+        self._last_snapshot: Dict[str, Any] = {}
+        self._last_history: List[Dict[str, Any]] = []
+
         self._build_ui(text)
 
+    # ---------- UI ----------
     def _build_ui(self, text: str):
-        # title + export
+        # Header
         header = ttk.Frame(self)
         header.pack(fill=tk.X)
         ttk.Label(header, text=text, font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT)
         ttk.Button(header, text="Export JSON…", command=self._export_current).pack(side=tk.RIGHT)
 
-        # summary box
+        # Summary box
         self.summary_frame = ttk.LabelFrame(self, text="Run summary")
         self.summary_frame.pack(fill=tk.X, pady=(8, 6))
         self._summary_labels: Dict[str, ttk.Label] = {}
         self._make_summary_grid(self.summary_frame)
 
-        # notebook for per-learner metrics
+        # Notebook for per-learner metrics
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill=tk.BOTH, expand=True)
         self._learner_tabs: Dict[str, Dict[str, Any]] = {}
 
-        # placeholders
-        self._last_snapshot: Optional[Dict[str, Any]] = None
-        self._last_run_summary: Optional[Dict[str, Any]] = None
-
-    # summary grid
     def _make_summary_grid(self, parent: ttk.LabelFrame):
         grid_items = [
-            ("pairs_scored", "Pairs scored"),
+            ("pairs_scored", "Pairs"),
             ("duplicates", "Duplicates"),
-            ("consensus_rate", "Consensus %"),
-            ("escalations_rate", "Escalations %"),
             ("non_duplicates", "Non-duplicates"),
             ("uncertain", "Uncertain"),
+            ("consensus_rate", "Consensus %"),
+            ("escalations_rate", "Escalations %"),
             ("clusters", "Clusters"),
             ("epochs_run", "Self-learning epochs"),
         ]
@@ -58,25 +74,27 @@ class MetricsPanel(ttk.Frame):
         for c in range(4):
             parent.grid_columnconfigure(c, weight=1)
 
-    # per-learner tab
     def _ensure_learner_tab(self, name: str):
         if name in self._learner_tabs:
             return
         frame = ttk.Frame(self.nb, padding=8)
         self.nb.add(frame, text=name)
-        # top KPIs
+
+        # Top KPIs
         top = ttk.Frame(frame)
         top.pack(fill=tk.X)
         labels = {
+            "n": ttk.Label(top, text="N: —"),
+            "pos_rate": ttk.Label(top, text="PosRate: —"),
             "auc": ttk.Label(top, text="AUC: —"),
             "brier": ttk.Label(top, text="Brier: —"),
             "threshold": ttk.Label(top, text="Threshold: —"),
             "target_precision": ttk.Label(top, text="Target precision: —"),
         }
-        for k in ("auc", "brier", "threshold", "target_precision"):
+        for k in ("n", "pos_rate", "auc", "brier", "threshold", "target_precision"):
             labels[k].pack(side=tk.LEFT, padx=(0, 16))
 
-        # reliability table
+        # Reliability table
         lf = ttk.LabelFrame(frame, text="Reliability (expected vs observed)")
         lf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         cols = ("prob_center", "expected", "observed", "count")
@@ -99,67 +117,121 @@ class MetricsPanel(ttk.Frame):
 
         self._learner_tabs[name] = {"frame": frame, "labels": labels, "tree": tree}
 
-    # public API
-    def update_metrics(self, *, run_summary: Optional[Dict[str, Any]] = None, snapshot: Optional[Dict[str, Any]] = None):
-        if run_summary is not None:
-            self._last_run_summary = run_summary
-            self._render_summary(run_summary)
-        if snapshot is not None:
-            self._last_snapshot = snapshot
-            self._render_learners(snapshot.get("learners") or {})
+    # ---------- Public API (expected by app.py) ----------
+    def set_snapshot(self, snapshot: Optional[Dict[str, Any]]):
+        """Accepts the full metrics snapshot dict from metrics_snapshot()."""
+        self._last_snapshot = snapshot or {}
 
-    # fill summary
-    def _render_summary(self, s: Dict[str, Any]):
+        # Extract normalized views
+        run = self._extract_run_summary(self._last_snapshot)
+        per_learner = self._extract_per_learner(self._last_snapshot)
+        clusters = self._extract_clusters(self._last_snapshot)
+
+        # Render
+        self._render_summary(run, clusters_count=len(clusters))
+        self._render_learners(per_learner)
+
+    def set_history(self, history: Optional[List[Dict[str, Any]]]):
+        """Optional history support; stored for export or future diff UI."""
+        self._last_history = history or []
+
+    # Back-compat helper some code paths may call
+    def update_metrics(self, *, run_summary: Optional[Dict[str, Any]] = None, snapshot: Optional[Dict[str, Any]] = None):
+        if snapshot is not None:
+            self.set_snapshot(snapshot)
+        if run_summary is not None:
+            # If someone passes a raw run_summary, render it over current snapshot-derived data
+            clusters = self._extract_clusters(self._last_snapshot)
+            self._render_summary(run_summary, clusters_count=len(clusters))
+
+    # ---------- Rendering ----------
+    def _render_summary(self, run_summary: Dict[str, Any], *, clusters_count: int):
         def _pct(x):
             try:
                 return f"{float(x) * 100.0:.1f}%"
             except Exception:
                 return "—"
 
+        # map to UI keys; tolerate several naming schemes
         mapping = {
-            "pairs_scored": s.get("pairs_scored") or s.get("pairs") or s.get("total_pairs"),
-            "duplicates": s.get("duplicates") or s.get("dups") or s.get("positives"),
-            "non_duplicates": s.get("non_duplicates") or s.get("negatives"),
-            "uncertain": s.get("uncertain"),
-            "consensus_rate": _pct(s.get("consensus_rate") if isinstance(s.get("consensus_rate"), (int, float)) else s.get("consensus")),
-            "escalations_rate": _pct(s.get("escalations_rate") if isinstance(s.get("escalations_rate"), (int, float)) else s.get("escalations")),
-            "clusters": s.get("clusters") or s.get("num_clusters"),
-            "epochs_run": s.get("epochs_run") or s.get("self_learning_epochs"),
+            "pairs_scored": run_summary.get("total_pairs")
+                             or run_summary.get("pairs_scored")
+                             or run_summary.get("pairs")
+                             or 0,
+            "duplicates": run_summary.get("duplicates") or 0,
+            "non_duplicates": run_summary.get("non_duplicates") or 0,
+            "uncertain": run_summary.get("uncertain") or 0,
+            "consensus_rate": _pct(
+                run_summary.get("consensus_rate")
+                if isinstance(run_summary.get("consensus_rate"), (int, float))
+                else run_summary.get("consensus")
+            ),
+            "escalations_rate": _pct(
+                run_summary.get("escalations_pct")
+                if isinstance(run_summary.get("escalations_pct"), (int, float))
+                else run_summary.get("escalations_rate")
+                if isinstance(run_summary.get("escalations_rate"), (int, float))
+                else run_summary.get("escalations")
+            ),
+            "clusters": clusters_count,
+            "epochs_run": run_summary.get("epochs_run") or run_summary.get("self_learning_epochs"),
         }
         for k, lbl in self._summary_labels.items():
             val = mapping.get(k)
             lbl.configure(text=("—" if val is None else str(val)))
 
-    # fill per-learner tabs
-    def _render_learners(self, learners: Dict[str, Any]):
-        for name, info in learners.items():
+    def _render_learners(self, per_learner: Dict[str, Any]):
+        # Add/update tabs
+        for name, info in sorted(per_learner.items()):
             self._ensure_learner_tab(name)
             tab = self._learner_tabs[name]
             labels = tab["labels"]
+
+            # Support either 'reliability' or 'reliability_bins'
+            bins = info.get("reliability")
+            if bins is None:
+                bins = info.get("reliability_bins")
+
+            n = info.get("n")
+            pr = info.get("pos_rate")
             auc = info.get("auc")
             brier = info.get("brier")
             thr = info.get("threshold")
             tprec = info.get("target_precision")
-            labels["auc"].configure(text=f"AUC: {auc:.3f}" if isinstance(auc, (int, float)) else "AUC: —")
-            labels["brier"].configure(text=f"Brier: {brier:.3f}" if isinstance(brier, (int, float)) else "Brier: —")
-            labels["threshold"].configure(text=f"Threshold: {thr:.3f}" if isinstance(thr, (int, float)) else "Threshold: —")
-            labels["target_precision"].configure(text=f"Target precision: {tprec:.3f}" if isinstance(tprec, (int, float)) else "Target precision: —")
-            self._fill_reliability(tab["tree"], info.get("reliability_bins") or [])
 
-        # remove tabs for learners not present anymore
-        present = set(learners.keys())
-        stale = [n for n in self._learner_tabs.keys() if n not in present]
+            labels["n"].configure(text=f"N: {int(n)}" if isinstance(n, (int, float)) else "N: —")
+            labels["pos_rate"].configure(text=f"PosRate: {float(pr):.3f}" if isinstance(pr, (int, float)) else "PosRate: —")
+            labels["auc"].configure(text=f"AUC: {float(auc):.3f}" if isinstance(auc, (int, float)) else "AUC: —")
+            labels["brier"].configure(text=f"Brier: {float(brier):.4f}" if isinstance(brier, (int, float)) else "Brier: —")
+            labels["threshold"].configure(text=f"Threshold: {float(thr):.3f}" if isinstance(thr, (int, float)) else "Threshold: —")
+            labels["target_precision"].configure(text=f"Target precision: {float(tprec):.3f}" if isinstance(tprec, (int, float)) else "Target precision: —")
+
+            self._fill_reliability(tab["tree"], bins)
+
+        # Remove tabs that are no longer present
+        present = set(per_learner.keys())
+        stale = [n for n in list(self._learner_tabs.keys()) if n not in present]
         for n in stale:
-            tab = self._learner_tabs.pop(n)
-            idx = self.nb.index(tab["frame"])
-            self.nb.forget(idx)
+            tab = self._learner_tabs.pop(n, None)
+            if tab:
+                try:
+                    idx = self.nb.index(tab["frame"])
+                    self.nb.forget(idx)
+                except Exception:
+                    pass
 
-        # select first tab if none selected
-        if self.nb.index("end") > 0 and not self.nb.select():
-            self.nb.select(0)
+        # Ensure a selection exists
+        try:
+            if self.nb.index("end") > 0 and not self.nb.select():
+                self.nb.select(0)
+        except Exception:
+            pass
 
     def _fill_reliability(self, tree: ttk.Treeview, bins: Any):
-        tree.delete(*tree.get_children())
+        # Clear table
+        for iid in tree.get_children():
+            tree.delete(iid)
+
         if not isinstance(bins, (list, tuple)):
             return
         for b in bins:
@@ -172,11 +244,31 @@ class MetricsPanel(ttk.Frame):
             except Exception:
                 continue
 
-    # export
+    # ---------- Extractors / normalizers ----------
+    def _extract_run_summary(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        # Prefer new shape
+        run = snapshot.get("run")
+        if isinstance(run, dict):
+            return run
+        # Or accept a flattened older shape
+        return snapshot.get("run_summary") or {}
+
+    def _extract_per_learner(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        pl = snapshot.get("per_learner")
+        if isinstance(pl, dict):
+            return pl
+        # some older shapes: snapshot["learners"]
+        return snapshot.get("learners") or {}
+
+    def _extract_clusters(self, snapshot: Dict[str, Any]) -> List[Any]:
+        cl = snapshot.get("clusters")
+        return cl if isinstance(cl, list) else []
+
+    # ---------- Export ----------
     def _export_current(self):
         data = {
-            "run_summary": self._last_run_summary,
             "metrics_snapshot": self._last_snapshot,
+            "history": self._last_history,
         }
         try:
             path = filedialog.asksaveasfilename(

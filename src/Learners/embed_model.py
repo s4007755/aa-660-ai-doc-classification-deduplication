@@ -1,7 +1,6 @@
 # src/learners/embed_model.py
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -26,14 +25,11 @@ from src.learners.base import (
     make_fresh_state,
 )
 
-# simple sentence splitter
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
-# unitize cosine
 def _cos_to_unit(x: float) -> float:
     return float((x + 1.0) * 0.5)
 
-# binned calibration (isotonic-like)
 def _fit_binned_calibration(scores: np.ndarray, labels: np.ndarray, n_bins: int = 20):
     if scores.size == 0:
         edges = np.linspace(0.0, 1.0, n_bins + 1, dtype=np.float32)
@@ -49,7 +45,6 @@ def _fit_binned_calibration(scores: np.ndarray, labels: np.ndarray, n_bins: int 
             probs[i] = probs[i - 1]
     return edges, probs.astype(np.float32)
 
-# apply binned calibration
 def _calibrated_prob(score: float, edges: np.ndarray, probs: np.ndarray) -> float:
     if not (0.0 <= score <= 1.0) or edges.size == 0:
         return max(0.0, min(1.0, score))
@@ -63,7 +58,6 @@ def _calibrated_prob(score: float, edges: np.ndarray, probs: np.ndarray) -> floa
         return float((1 - t) * p + t * p_next)
     return float(p)
 
-# threshold by target precision
 def _choose_threshold(scores: np.ndarray, labels: np.ndarray, edges: np.ndarray, probs: np.ndarray, target_precision: float) -> float:
     if scores.size == 0:
         return 0.5
@@ -81,7 +75,6 @@ def _choose_threshold(scores: np.ndarray, labels: np.ndarray, edges: np.ndarray,
             best = min(best, float(th))
     return float(best)
 
-# cheap hashing embed fallback
 def _cheap_embed(texts: List[str], dim: int = 384) -> np.ndarray:
     if not texts:
         return np.zeros((0, dim), dtype=np.float32)
@@ -105,12 +98,10 @@ class _State:
     top_pc: Optional[np.ndarray] = None
 
 class EmbeddingLearner(ILearner):
-    # name
     @property
     def name(self) -> str:
         return "embedding"
 
-    # init
     def __init__(self, config: Optional[LearnerConfig] = None):
         self._config: LearnerConfig = config or LearnerConfig()
         self._state: LearnerState = make_fresh_state("embedding init")
@@ -118,7 +109,6 @@ class EmbeddingLearner(ILearner):
         self._model: Optional[Any] = None
         self._using_fallback = False
 
-    # config
     @property
     def config(self) -> LearnerConfig:
         return self._config
@@ -126,12 +116,13 @@ class EmbeddingLearner(ILearner):
     def configure(self, config: LearnerConfig) -> None:
         self._config = config
 
-    # state
     def load_state(self, state: Optional[LearnerState]) -> None:
         self._state = state or make_fresh_state("embedding fresh")
         lp = self._state.learned_params or {}
-        self._istate.edges = np.array(lp.get("bin_edges", []), dtype=np.float32) or None
-        self._istate.probs = np.array(lp.get("bin_probs", []), dtype=np.float32) or None
+        edges_arr = np.array(lp.get("bin_edges", []), dtype=np.float32)
+        probs_arr = np.array(lp.get("bin_probs", []), dtype=np.float32)
+        self._istate.edges = edges_arr if edges_arr.size else None
+        self._istate.probs = probs_arr if probs_arr.size else None
         mean = np.array(lp.get("domain_mean", []), dtype=np.float32)
         self._istate.mean = mean if mean.size else None
         top_pc = np.array(lp.get("domain_top_pc", []), dtype=np.float32)
@@ -140,21 +131,26 @@ class EmbeddingLearner(ILearner):
     def get_state(self) -> LearnerState:
         return self._state
 
-    # prepare
     def prepare(self, corpus_stats: Optional[CorpusStats] = None) -> None:
         if self._model is not None or self._using_fallback:
             return
-        model_name = str(self._config.extras.get("model_name", "sentence-transformers/all-MiniLM-L6-v2"))
+        model_name = str(self._config.extras.get("model_name", "fallback")).strip().lower()
+
+        # Force cheap local embedding if user chose
+        if model_name in ("fallback", "none", "off"):
+            self._model = None
+            self._using_fallback = True
+            return
+
         try:
             if SentenceTransformer is None:
                 raise RuntimeError("sentence-transformers not available")
             self._model = SentenceTransformer(model_name)
-            _ = int(self._config.extras.get("batch_size", 64))
+            _ = int(self._config.extras.get("batch_size", 64))  # validate
         except Exception:
             self._model = None
             self._using_fallback = True
 
-    # score single pair
     def score_pair(self, a: DocumentView, b: DocumentView) -> LearnerOutput:
         e1 = self._embed_texts([a.text])[0]
         e2 = self._embed_texts([b.text])[0]
@@ -189,12 +185,10 @@ class EmbeddingLearner(ILearner):
             internals=None,
         )
 
-    # batch score
     def batch_score(self, pairs: Iterable[Pair]) -> List[LearnerOutput]:
         pairs_list = list(pairs)
         if not pairs_list:
             return []
-        # embed all unique docs once
         unique: Dict[str, str] = {}
         for a, b in pairs_list:
             unique.setdefault(a.doc_id, a.text)
@@ -219,21 +213,39 @@ class EmbeddingLearner(ILearner):
             outs.append(LearnerOutput(raw_score=float(score), prob=float(prob), threshold=th, rationale=rationale))
         return outs
 
-    # fit calibration from bootstrap
     def fit_calibration(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> LearnerState:
         pos_pairs = list(positives)
         neg_pairs = list(negatives)
         if not pos_pairs and not neg_pairs:
             return self._state
 
-        pos_scores = np.array([self._raw_score(a, b) for a, b in pos_pairs], dtype=np.float32)
-        neg_scores = np.array([self._raw_score(a, b) for a, b in neg_pairs], dtype=np.float32)
+        # 1) Embed each unique doc once
+        uniq: Dict[str, DocumentView] = {}
+        for a, b in pos_pairs:
+            uniq.setdefault(a.doc_id, a)
+            uniq.setdefault(b.doc_id, b)
+        for a, b in neg_pairs:
+            uniq.setdefault(a.doc_id, a)
+            uniq.setdefault(b.doc_id, b)
+
+        ids = list(uniq.keys())
+        texts = [uniq[i].text for i in ids]
+        embs = self._embed_texts(texts)
+        embs = np.vstack([self._apply_whiten(e) for e in embs])
+        emb_map = {ids[i]: embs[i] for i in range(len(ids))}
+
+        def _pair_score(a: DocumentView, b: DocumentView) -> float:
+            return _cos_to_unit(float(np.dot(emb_map[a.doc_id], emb_map[b.doc_id])))
+
+        # 2) Compute scores using cached embeddings
+        pos_scores = np.array([_pair_score(a, b) for a, b in pos_pairs], dtype=np.float32)
+        neg_scores = np.array([_pair_score(a, b) for a, b in neg_pairs], dtype=np.float32)
         scores = np.concatenate([pos_scores, neg_scores], axis=0)
         labels = np.concatenate([np.ones_like(pos_scores), np.zeros_like(neg_scores)], axis=0)
 
+        # 3) Calibrate + pick threshold
         edges, probs = _fit_binned_calibration(scores, labels, n_bins=int(self._config.extras.get("n_bins", 20)))
         th = _choose_threshold(scores, labels, edges, probs, target_precision=float(self._config.target_precision))
-
         cal_probs = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
         brier = float(np.mean((cal_probs - labels) ** 2))
 
@@ -251,23 +263,21 @@ class EmbeddingLearner(ILearner):
             "bin_probs": probs.tolist(),
             "domain_mean": None if self._istate.mean is None else self._istate.mean.tolist(),
             "domain_top_pc": None if self._istate.top_pc is None else self._istate.top_pc.tolist(),
-            "model_name": str(self._config.extras.get("model_name", "sentence-transformers/all-MiniLM-L6-v2")),
+            "model_name": str(self._config.extras.get("model_name", "fallback")),
             "batch_size": int(self._config.extras.get("batch_size", 64)),
         }
         return self._state
+
+
     def self_train(self, pseudo_labels: Iterable[PairLabel]) -> LearnerState:
         return self._state
 
-    # internals
-
-    # raw score in [0,1] from cosine
     def _raw_score(self, a: DocumentView, b: DocumentView) -> float:
         e1 = self._apply_whiten(self._embed_texts([a.text])[0])
         e2 = self._apply_whiten(self._embed_texts([b.text])[0])
         cos = float(np.dot(e1, e2))
         return _cos_to_unit(cos)
 
-    # embed many texts with model or fallback
     def _embed_texts(self, texts: List[str]) -> np.ndarray:
         if not texts:
             return np.zeros((0, 384), dtype=np.float32)
@@ -303,22 +313,18 @@ class EmbeddingLearner(ILearner):
             v /= n
         return v
 
-    # top-K matching sentence pairs for rationale
     def _top_sentence_pairs(self, a: DocumentView, b: DocumentView, top_k: int = 3) -> List[Dict[str, Any]]:
         sa = a.sentences if a.sentences else [s.strip() for s in _SENT_SPLIT.split(a.text or "") if s.strip()]
         sb = b.sentences if b.sentences else [s.strip() for s in _SENT_SPLIT.split(b.text or "") if s.strip()]
         if not sa or not sb:
             return []
-
         max_sents = int(self._config.extras.get("max_sentences_explain", 20))
         sa = sa[:max_sents]; sb = sb[:max_sents]
-
         ea = self._embed_texts(sa)
         eb = self._embed_texts(sb)
         ea = np.vstack([self._apply_whiten(x) for x in ea])
         eb = np.vstack([self._apply_whiten(x) for x in eb])
-
-        sim = ea @ eb.T  # cosine since vectors are normalized
+        sim = ea @ eb.T
         pairs: List[Tuple[int, int, float]] = []
         for i in range(sim.shape[0]):
             for j in range(sim.shape[1]):
@@ -336,7 +342,6 @@ class EmbeddingLearner(ILearner):
                 break
         return out
 
-    # reliability bins for report/GUI
     def _reliability_bins(self, scores: np.ndarray, labels: np.ndarray, edges: np.ndarray, probs: np.ndarray, n_bins: int = 10):
         centers = np.linspace(0.05, 0.95, n_bins, dtype=np.float32)
         rows: List[Dict[str, Any]] = []

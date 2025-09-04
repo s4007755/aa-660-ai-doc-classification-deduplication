@@ -153,7 +153,7 @@ class App(tk.Tk):
 
         left_scroller = VScrollFrame(left_wrap)
         left_scroller.pack(fill=tk.BOTH, expand=True)
-        left = left_scroller.inner   # place controls inside this frame
+        left = left_scroller.inner
 
         # Profiles row
         prof = ttk.LabelFrame(left, text="Profile")
@@ -304,7 +304,20 @@ class App(tk.Tk):
 
         self._refresh_docs_from_db()
 
-    # Run button callback
+    # helper: map doc_id -> filename (for trace labels)
+    def _doc_labels_from_db(self) -> Dict[str, str]:
+        labels: Dict[str, str] = {}
+        try:
+            rows = sqlite_store.get_all_document_files()
+        except Exception:
+            return labels
+        for r in rows:
+            did = r.get("doc_id")
+            name = r.get("filename") or os.path.basename(r.get("filepath") or "") or None
+            if did and name and did not in labels:
+                labels[did] = name
+        return labels
+
     def _on_run_clicked(self):
         if self.running:
             return
@@ -322,14 +335,24 @@ class App(tk.Tk):
         # Background thread to avoid freezing UI
         self.running = True
         self.btn_run.configure(state=tk.DISABLED)
-        self.var_status.set("Running…")
+        self.var_status.set("Starting…")
 
         def worker():
             err = None
             result = None
             try:
                 _ = compute_corpus_stats(self.docs)
-                result = run_intelligent_pipeline(self.docs, config=pconfig, run_notes=self.profile_var.get())
+
+                def ui_progress(done: int, total: int, phase: str):
+                    pct = (done / total * 100.0) if total else 0.0
+                    self.after(0, lambda: self.var_status.set(f"{phase}… {done}/{total} ({pct:.1f}%)"))
+
+                result = run_intelligent_pipeline(
+                    self.docs,
+                    config=pconfig,
+                    run_notes=self.profile_var.get(),
+                    progress_cb=ui_progress,
+                )
             except Exception as ex:
                 err = ex
             finally:
@@ -350,14 +373,27 @@ class App(tk.Tk):
         self.pipeline_result = result or {}
         self.var_status.set("Completed")
 
-        # Update summary, traces, metrics, history
+        # Update summary text
         self._render_summary(self.pipeline_result)
-        traces = self.pipeline_result.get("traces") or []
-        self.trace_view.set_traces(traces)
 
-        snap = (self.pipeline_result.get("metrics_snapshot") or {})
-        self.metrics_panel.set_snapshot(snap)
-        self.metrics_panel.set_history([snap])
+        # Decision Traces with filenames
+        traces = self.pipeline_result.get("traces") or []
+        self.trace_view.set_traces(traces, doc_labels=self._doc_labels_from_db())
+
+        # MetricsPanel: normalize keys and use update_metrics()
+        raw_snap = self.pipeline_result.get("metrics_snapshot") or {}
+        run_summary = (self.pipeline_result.get("run_summary") or raw_snap.get("run") or {})
+
+        if "escalations_pct" in run_summary and "escalations_rate" not in run_summary:
+            run_summary = dict(run_summary)
+            run_summary["escalations_rate"] = run_summary["escalations_pct"]
+
+        snap_norm = {
+            "learners": raw_snap.get("per_learner", {}),
+            "run": run_summary,
+            "clusters": raw_snap.get("clusters", []),
+        }
+        self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm)
 
         # Refresh history tab
         try:
@@ -373,12 +409,13 @@ class App(tk.Tk):
         lines.append(f"Run ID: {res.get('run_id', '—')}")
         rs = res.get("run_summary") or {}
         if rs:
-            lines.append(f"Pairs: {rs.get('pairs_scored', '—')}")
+            pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs') or '—'
+            lines.append(f"Pairs: {pairs}")
             lines.append(f"Duplicates: {rs.get('duplicates', '—')}")
             lines.append(f"Non-duplicates: {rs.get('non_duplicates', '—')}")
             lines.append(f"Uncertain: {rs.get('uncertain', '—')}")
             cr = rs.get("consensus_rate")
-            er = rs.get("escalations_rate")
+            er = rs.get("escalations_rate") or rs.get("escalations_pct")
             if isinstance(cr, (int, float)):
                 lines.append(f"Consensus rate: {cr * 100:.1f}%")
             if isinstance(er, (int, float)):
@@ -493,7 +530,7 @@ class App(tk.Tk):
     # Documents tab actions
     def _on_add_files(self):
         if _ingestion_mod is None:
-            messagebox.showerror("Missing ingestion", "ingestion.py not found. Keep your legacy ingestion module or add src/pipelines/ingestion.py.")
+            messagebox.showerror("Missing ingestion", "ingestion.py not found.")
             return
         paths = filedialog.askopenfilenames(
             title="Select files",
@@ -505,7 +542,7 @@ class App(tk.Tk):
 
     def _on_add_folder(self):
         if _ingestion_mod is None:
-            messagebox.showerror("Missing ingestion", "ingestion.py not found. Keep your legacy ingestion module or add src/pipelines/ingestion.py.")
+            messagebox.showerror("Missing ingestion", "ingestion.py not found.")
             return
         folder = filedialog.askdirectory(title="Select folder")
         if not folder:
@@ -525,7 +562,7 @@ class App(tk.Tk):
         selected = [self.docs_tree.item(iid, "values")[0] for iid in self.docs_tree.selection()]
         if not selected:
             return
-        if not messagebox.askyesno("Delete documents", f"Delete {len(selected)} document(s) from DB? This removes their text and mappings."):
+        if not messagebox.askyesno("Delete documents", f"Delete {len(selected)} documents from DB?"):
             return
         try:
             sqlite_store.delete_documents(selected)
@@ -558,7 +595,17 @@ class App(tk.Tk):
         data = _ingestion_mod.extract_document(path)
         raw_text = data.get("raw_text") or ""
         meta = data.get("metadata") or {}
-        doc_id = meta.get("hash") or os.path.basename(path)
+
+        # make one document per file-version (path + mtime)
+        import hashlib, os
+        abs_path = os.path.abspath(path)
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except Exception:
+            mtime_ns = 0
+
+        # unique doc id per file version
+        doc_id = hashlib.sha1(f"{abs_path}|{mtime_ns}".encode("utf-8", errors="ignore")).hexdigest()
 
         # normalize
         norm = normalize_text(raw_text)
@@ -573,10 +620,8 @@ class App(tk.Tk):
                 "filesize": meta.get("filesize") or 0,
             },
         )
-        try:
-            mtime_ns = os.stat(path).st_mtime_ns
-        except Exception:
-            mtime_ns = None
+
+        # file mapping
         sqlite_store.add_file_mapping(doc_id, path, mtime_ns)
 
 

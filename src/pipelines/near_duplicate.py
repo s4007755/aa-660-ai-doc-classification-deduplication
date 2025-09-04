@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 try:
     from datasketch import MinHash, MinHashLSH
@@ -11,11 +11,7 @@ except Exception:
     MinHash = None
     MinHashLSH = None
 
-from src.learners.base import (
-    DocumentView,
-    LearnerConfig,
-    CorpusStats,
-)
+from src.learners.base import DocumentView, LearnerConfig, CorpusStats
 from src.learners.simhash_model import SimHashLearner as SimhashLearner
 from src.learners.minhash_model import MinHashLearner
 from src.learners.embed_model import EmbeddingLearner
@@ -25,7 +21,8 @@ from src.training.calibration import build_bootstrap_from_exact_duplicates
 from src.persistence import state_store as store
 from src.metrics.metrics import summarize_run, metrics_snapshot
 
-# pipeline knobs
+ProgressCB = Optional[Callable[[int, int, str], None]]
+
 @dataclass
 class CandidateConfig:
     use_lsh: bool = True
@@ -56,13 +53,20 @@ class PipelineConfig:
     self_learning: SelfLearningConfig = field(default_factory=SelfLearningConfig)
     persist: bool = True
 
-# run intelligent mode on a set of documents
 def run_intelligent_pipeline(
     docs: Iterable[DocumentView],
     *,
     config: Optional[PipelineConfig] = None,
     run_notes: str = "",
+    progress_cb: ProgressCB = None,
 ) -> Dict[str, Any]:
+    def report(phase: str, done: int, total: int):
+        if progress_cb:
+            try:
+                progress_cb(done, total, phase)
+            except Exception:
+                pass
+
     cfg = config or PipelineConfig()
     docs_list = [d for d in docs if (d.text or "").strip()]
     id_map = {d.doc_id: d for d in docs_list}
@@ -80,40 +84,66 @@ def run_intelligent_pipeline(
     stats: CorpusStats = compute_corpus_stats(docs_list)
     arb.prepare(stats)
 
-    # bootstrap calibration
-    pos, neg = build_bootstrap_from_exact_duplicates(
-        id_map,
-        max_pos_pairs=cfg.bootstrap.max_pos_pairs,
-        max_neg_pairs=cfg.bootstrap.max_neg_pairs,
+    # Calibration
+    report("calibration/bootstrap/prepare", 0, 1)
+    pos, neg = _build_easy_bootstrap(
+        docs_list,
+        max_pos=cfg.bootstrap.max_pos_pairs,
+        max_neg=cfg.bootstrap.max_neg_pairs,
+        progress=lambda d, t, p: report(f"calibration/bootstrap/{p}", d, t),
     )
-    _ = arb.calibrate_from_bootstrap(pos, neg)
-    for ln in learners:
-        store.save_learner_state(ln.name, ln.get_state())
+    report("calibration/bootstrap/done", 1, 1)
 
-    # candidates
+    for ln in learners:
+        phase = f"calibration/{ln.name}"
+        report(phase, 0, 1)
+        try:
+            ln.fit_calibration(pos, neg)
+            # persist after each learner
+            store.save_learner_state(ln.name, ln.get_state())
+        finally:
+            report(phase, 1, 1)
+
+    try:
+        _ = arb.calibrate_from_bootstrap(pos, neg)
+    except TypeError:
+        pass
+
+    # Candidates
+    report("candidates", 0, 1)
     cands = generate_candidates(docs_list, cfg.candidates)
+    report("candidates", 1, 1)
 
     # start run
     run_cfg_json = json.dumps(_export_run_config(cfg, stats), ensure_ascii=False)
     run_id = store.start_run(run_cfg_json, status="running", notes=run_notes) if cfg.persist else -1
 
-    # score
+    # Scoring
     traces: List[DecisionTrace] = []
-    for (a_id, b_id) in cands:
+    total = max(1, len(cands))
+    for i, (a_id, b_id) in enumerate(cands, start=1):
         tr = arb.score_pair(id_map[a_id], id_map[b_id])
         traces.append(tr)
+        if (i % 25) == 0 or i == total:
+            report("scoring", i, total)
 
-    # self-learning
+    # Self-learning
     if cfg.self_learning.enabled and cfg.self_learning.epochs > 0:
-        _ = arb.run_self_learning_loop(((id_map[a], id_map[b]) for (a, b) in cands), epochs=cfg.self_learning.epochs)
-        for ln in learners:
-            store.save_learner_state(ln.name, ln.get_state())
+        epochs = int(cfg.self_learning.epochs)
+        for e in range(epochs):
+            report("self-learning", e, epochs)
+            _ = arb.run_self_learning_loop(((id_map[a], id_map[b]) for (a, b) in cands), epochs=1)
+            for ln in learners:
+                store.save_learner_state(ln.name, ln.get_state())
+        report("self-learning", epochs, epochs)
 
-    # persist
+    # Persist
     if cfg.persist and run_id != -1:
+        report("persisting", 0, 1)
         _persist_calibrations(run_id, learners)
         store.bulk_insert_decisions(run_id, traces)
         store.end_run(run_id, status="completed")
+        report("persisting", 1, 1)
 
     # clusters + metrics
     clusters = build_clusters_from_traces(traces)
@@ -129,7 +159,55 @@ def run_intelligent_pipeline(
         "metrics_snapshot": snapshot,
     }
 
-# build clusters from duplicate traces
+
+# Fast, explicit bootstrap
+def _build_easy_bootstrap(
+    docs: List[DocumentView],
+    *,
+    max_pos: int,
+    max_neg: int,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> Tuple[List[Tuple[DocumentView, DocumentView]], List[Tuple[DocumentView, DocumentView]]]:
+    def p(d, t, s): 
+        if progress:
+            try: progress(d, t, s)
+            except Exception: pass
+
+    # Group by exact normalized text
+    p(0, 3, "group")
+    groups: Dict[str, List[DocumentView]] = {}
+    for d in docs:
+        groups.setdefault(d.text or "", []).append(d)
+    p(1, 3, "group")
+
+    # Positives: all pairs within each group (capped)
+    pos: List[Tuple[DocumentView, DocumentView]] = []
+    for g in groups.values():
+        n = len(g)
+        if n >= 2:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pos.append((g[i], g[j]))
+                    if len(pos) >= max_pos:
+                        break
+                if len(pos) >= max_pos:
+                    break
+    p(2, 3, "positives")
+
+    # Negatives: pairs from different groups (simple round-robin cap)
+    neg: List[Tuple[DocumentView, DocumentView]] = []
+    reps = [v[0] for v in groups.values() if v]
+    for i in range(len(reps)):
+        for j in range(i + 1, len(reps)):
+            neg.append((reps[i], reps[j]))
+            if len(neg) >= max_neg:
+                break
+        if len(neg) >= max_neg:
+            break
+    p(3, 3, "negatives")
+
+    return pos, neg
+
 def build_clusters_from_traces(traces: Iterable[DecisionTrace]) -> List[List[str]]:
     parent: Dict[str, str] = {}
     def find(x: str) -> str:
@@ -155,11 +233,7 @@ def build_clusters_from_traces(traces: Iterable[DecisionTrace]) -> List[List[str
     out.sort(key=lambda c: (-len(c), c[0]))
     return out
 
-# generate candidates via MinHash LSH
-def generate_candidates(
-    docs: List[DocumentView],
-    ccfg: CandidateConfig,
-) -> List[Tuple[str, str]]:
+def generate_candidates(docs: List[DocumentView], ccfg: CandidateConfig) -> List[Tuple[str, str]]:
     tok_map: Dict[str, List[str]] = {d.doc_id: (d.tokens if d.tokens is not None else tokenize_words(d.text)) for d in docs}
     ids = [d.doc_id for d in docs]
 
@@ -196,7 +270,6 @@ def generate_candidates(
             out = out[: int(ccfg.max_total_candidates)]
         return out
 
-    # fallback: dense windowing sample
     pairs: List[Tuple[str, str]] = []
     n = len(ids)
     cap = ccfg.max_total_candidates or (n * min(n - 1, 20))
@@ -208,12 +281,10 @@ def generate_candidates(
                 return pairs
     return pairs
 
-# load prior learner state if present
 def _maybe_load(learner) -> None:
     st = store.load_learner_state(learner.name)
     learner.load_state(st)
 
-# persist per-learner calibration snapshot
 def _persist_calibrations(run_id: int, learners: List[Any]) -> None:
     for ln in learners:
         st = ln.get_state()
@@ -223,7 +294,6 @@ def _persist_calibrations(run_id: int, learners: List[Any]) -> None:
         reliability_json = json.dumps(cal.reliability_bins or [], ensure_ascii=False)
         store.save_calibration(run_id, ln.name, method, params_json, reliability_json)
 
-# export config for persistence
 def _export_run_config(cfg: PipelineConfig, stats: CorpusStats) -> Dict[str, Any]:
     return {
         "pipeline": {

@@ -16,6 +16,8 @@ class TraceViewer(ttk.Frame):
         self._build_ui(text)
         self._traces: Dict[str, Dict[str, Any]] = {}
         self._order: List[str] = []
+        # NEW: labels cache {doc_id -> filename}
+        self._doc_labels: Dict[str, str] = {}
 
     # UI
 
@@ -53,8 +55,8 @@ class TraceViewer(ttk.Frame):
             self.tree.heading(cid, text=label)
             anchor = tk.W if cid in {"pair_key", "reason"} else (tk.CENTER if cid in {"label"} else tk.W)
             width = {
-                "pair_key": 220, "a_id": 120, "b_id": 120,
-                "label": 90, "reason": 160, "agreed": 160, "steps": 160,
+                "pair_key": 220, "a_id": 260, "b_id": 260,   # widened A/B for filenames
+                "label": 90, "reason": 180, "agreed": 160, "steps": 160,
             }[cid]
             self.tree.column(cid, width=width, anchor=anchor, stretch=True)
         vs = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
@@ -102,10 +104,24 @@ class TraceViewer(ttk.Frame):
         self._order.clear()
         self._render_detail(None)
 
-    def set_traces(self, traces: Iterable[DecisionTrace | Dict[str, Any]]):
+    def set_traces(
+        self,
+        traces: Iterable[DecisionTrace | Dict[str, Any]],
+        *,
+        doc_labels: Optional[Dict[str, str]] = None,  # NEW
+    ):
+        """Set traces, optionally with {doc_id -> filename} mapping for pretty labels."""
         self.clear()
+        if doc_labels:
+            self._doc_labels = dict(doc_labels)
         for tr in traces:
             self.add_trace(tr)
+
+    def set_doc_labels(self, labels: Dict[str, str]):
+        """Optional: update labels after traces are loaded."""
+        self._doc_labels = dict(labels or {})
+        # Re-render rows with new labels
+        self._apply_filter()
 
     def add_trace(self, trace: DecisionTrace | Dict[str, Any]):
         # normalize to dict via as_dict if needed
@@ -129,13 +145,22 @@ class TraceViewer(ttk.Frame):
 
     # Internals
 
+    def _fmt_doc(self, did: str) -> str:
+        """filename (abcd1234) if known, else did"""
+        if not did or did == "—":
+            return did or "—"
+        name = self._doc_labels.get(did)
+        return f"{name} ({did[:8]})" if name else did
+
     def _insert_row(self, tr: Dict[str, Any]):
         steps = ", ".join(tr.get("escalation_steps") or [])
         agreed = ", ".join(tr.get("agreed_learners") or [])
+        a_disp = self._fmt_doc(tr.get("a_id", "—"))
+        b_disp = self._fmt_doc(tr.get("b_id", "—"))
         vals = (
             tr.get("pair_key", "—"),
-            tr.get("a_id", "—"),
-            tr.get("b_id", "—"),
+            a_disp,
+            b_disp,
             tr.get("final_label", "—"),
             tr.get("reason", "—"),
             agreed or "—",
@@ -148,10 +173,13 @@ class TraceViewer(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         for key in self._order:
             tr = self._traces[key]
+            a_id = tr.get("a_id", "")
+            b_id = tr.get("b_id", "")
+            a_disp = self._fmt_doc(a_id)
+            b_disp = self._fmt_doc(b_id)
             hay = " ".join([
                 tr.get("pair_key", ""),
-                tr.get("a_id", ""),
-                tr.get("b_id", ""),
+                a_id, b_id, a_disp, b_disp,  # include both ids and names
                 tr.get("final_label", ""),
                 tr.get("reason", ""),
                 " ".join(tr.get("agreed_learners") or []),
@@ -182,7 +210,10 @@ class TraceViewer(ttk.Frame):
             self.lbl_steps.configure(text="Escalation steps: —")
             return
 
-        self.lbl_pair.configure(text=f"Pair: {tr.get('pair_key','—')}")
+        a_disp = self._fmt_doc(tr.get("a_id", "—"))
+        b_disp = self._fmt_doc(tr.get("b_id", "—"))
+        pair_key = tr.get("pair_key", "—")
+        self.lbl_pair.configure(text=f"Pair: {a_disp}  ⇄  {b_disp}   ·   key: {pair_key}")
         self.lbl_label.configure(text=f"Final: {tr.get('final_label','—')}")
         self.lbl_reason.configure(text=f"Reason: {tr.get('reason','—')}")
         agreed = ", ".join(tr.get("agreed_learners") or [])

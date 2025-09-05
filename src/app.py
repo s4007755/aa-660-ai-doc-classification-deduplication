@@ -412,7 +412,7 @@ class App(tk.Tk):
             pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs') or '—'
             lines.append(f"Pairs: {pairs}")
             lines.append(f"Duplicates: {rs.get('duplicates', '—')}")
-            lines.append(f"Non-duplicates: {rs.get('non_duplicates', '—')}")
+            lines.append(f"Near-duplicates: {rs.get('non_duplicates', '—')}")
             lines.append(f"Uncertain: {rs.get('uncertain', '—')}")
             cr = rs.get("consensus_rate")
             er = rs.get("escalations_rate") or rs.get("escalations_pct")

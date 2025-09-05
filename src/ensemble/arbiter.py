@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
+import hashlib
+import unicodedata
+
 from src.learners.base import (
     DocumentView,
     Pair,
@@ -16,8 +19,8 @@ from src.learners.base import (
     stable_pair_key,
 )
 
-# Final labels assigned by consensus/escalation
 FinalLabel = Literal["DUPLICATE", "NON_DUPLICATE", "UNCERTAIN"]
+
 
 # Arbiter configuration
 @dataclass
@@ -33,6 +36,11 @@ class ArbiterConfig:
     max_self_train_epochs: int = 2        # number of self-training rounds
     strong_margin: float = 0.07           # margin used to create strong pseudo-labels
     random_state: int = 13                # for any sampling choices
+
+    # Exact duplicate short-circuit
+    enable_exact_check: bool = True
+    exact_normalization: Literal["none", "line_endings", "unicode_lines"] = "unicode_lines"
+
 
 # Single decision trace for a pair
 @dataclass
@@ -68,12 +76,14 @@ class DecisionTrace:
             }
         return out
 
+
 # Summary of what changed in a self-learning round
 @dataclass
 class LearningUpdate:
     learner_name: str
     updated_state: LearnerState
     notes: str = ""
+
 
 class Arbiter:
     # Build with a list of learners and an arbiter config
@@ -98,20 +108,77 @@ class Arbiter:
             updates.append(LearningUpdate(learner_name=ln.name, updated_state=st, notes="bootstrap calibration"))
         return updates
 
+    # Exact duplicate helpers
+
+    def _doc_text(self, dv: DocumentView) -> str:
+        if hasattr(dv, "text") and getattr(dv, "text") is not None:
+            return dv.text
+        if hasattr(dv, "content") and getattr(dv, "content") is not None:
+            return dv.content
+        return ""
+
+    def _canonicalize_for_exact(self, s: str) -> str:
+        mode = self.config.exact_normalization
+        if mode in ("line_endings", "unicode_lines"):
+            s = s.replace("\r\n", "\n").replace("\r", "\n")
+        if mode == "unicode_lines":
+            if s.startswith("\ufeff"):
+                s = s.lstrip("\ufeff")
+            s = unicodedata.normalize("NFC", s)
+        return s
+
+    def _exact_hash(self, dv: DocumentView) -> str:
+        text = self._doc_text(dv)
+        text = self._canonicalize_for_exact(text)
+        return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+    def _is_exact_duplicate(self, a: DocumentView, b: DocumentView) -> bool:
+        if not self.config.enable_exact_check:
+            return False
+        return self._exact_hash(a) == self._exact_hash(b)
+
+    # Main scoring
+
     # Score a single pair with consensus and escalation if needed
     def score_pair(self, a: DocumentView, b: DocumentView) -> DecisionTrace:
+        # 0) Exact content short-circuit
+        if self._is_exact_duplicate(a, b):
+            synthetic: Dict[str, LearnerOutput] = {}
+            for ln in self.learners:
+                # Keep thresholds if present
+                th = ln.get_state().calibration.threshold
+                synthetic[ln.name] = LearnerOutput(
+                    raw_score=1.0,
+                    prob=1.0,
+                    threshold=(0.999 if th is None else float(th)),
+                    rationale={"rule": "exact_content_match", "canonicalization": str(self.config.exact_normalization)},
+                    warnings=[],
+                )
+            return self._make_trace(
+                a=a,
+                b=b,
+                outputs=synthetic,
+                agreed=[ln.name for ln in self.learners],
+                label="DUPLICATE",
+                reason="exact_content_match",
+                steps=[],
+            )
+
+        # 1) Normal scoring with all learners
         base_outputs = self._score_all(a, b)
         agreed = [n for n, o in base_outputs.items() if self._votes(o, self._min_confidence_of(n))]
         if len(agreed) >= self.config.require_agreement:
             return self._make_trace(a, b, base_outputs, agreed, "DUPLICATE", "consensus")
 
+        # 2) Quick out if clearly below thresholds across the board
         if self._all_clearly_below(base_outputs):
             return self._make_trace(a, b, base_outputs, [], "NON_DUPLICATE", "all_below")
 
+        # 3) If we are not in the gray zone, call it non-duplicate
         if not self._in_gray_zone(base_outputs):
             return self._make_trace(a, b, base_outputs, [], "NON_DUPLICATE", "no_consensus_not_gray")
 
-        # Try escalation steps
+        # 4) Escalation loop (mutates configs temporarily)
         outputs, agreed_after, steps_done = self._escalate(a, b, base_outputs)
         if len(agreed_after) >= self.config.require_agreement:
             return self._make_trace(a, b, outputs, agreed_after, "DUPLICATE", "consensus_after_escalation", steps_done)
@@ -119,6 +186,7 @@ class Arbiter:
         if self._all_clearly_below(outputs):
             return self._make_trace(a, b, outputs, [], "NON_DUPLICATE", "all_below_after_escalation", steps_done)
 
+        # 5) Still unresolved → UNCERTAIN
         return self._make_trace(a, b, outputs, [], "UNCERTAIN", "unresolved_gray_zone", steps_done)
 
     # Score many pairs
@@ -183,7 +251,8 @@ class Arbiter:
                 break
         return {"epochs_run": len(history), "history": history}
 
-    # Internal helpers
+    # Internals
+
     def _score_all(self, a: DocumentView, b: DocumentView) -> Dict[str, LearnerOutput]:
         outputs: Dict[str, LearnerOutput] = {}
         for ln in self.learners:
@@ -280,7 +349,7 @@ class Arbiter:
         return current_outputs, final_agreed, steps_done
 
     def _apply_escalation_step(self, step: str) -> None:
-        # Mutate learner configs in-memory;
+        # Mutate learner configs in-memory
         for ln in self.learners:
             cfg = LearnerConfig(
                 enabled=ln.config.enabled,

@@ -177,7 +177,6 @@ class RunHistory(ttk.Frame):
         self._populate_runs(self._runs)
 
     # Internals
-
     def _populate_runs(self, rows: Iterable[Dict[str, Any]]):
         self.tree.delete(*self.tree.get_children())
         for r in rows:
@@ -259,8 +258,8 @@ class RunHistory(ttk.Frame):
             "duplicates": d.get("duplicates"),
             "non_duplicates": d.get("non_duplicates"),
             "uncertain": d.get("uncertain"),
-            "consensus_rate": _pct(d.get("consensus_rate")),
-            "escalations_rate": _pct(d.get("escalations_rate")),
+            "consensus_rate": _pct(d.get("consensus_rate", d.get("consensus_pct"))),
+            "escalations_rate": _pct(d.get("escalations_rate", d.get("escalations_pct"))),
             "clusters": d.get("clusters"),
             "epochs_run": d.get("epochs_run"),
             "report_path": d.get("report_path"),
@@ -306,27 +305,35 @@ class RunHistory(ttk.Frame):
             self.cal_tree.insert("", tk.END, values=(learner, method, threshold, rbcnt))
 
     # Actions
-
     def _open_report(self):
         run = self._selected_run_details()
         if not run:
             return
+        rid = int(run.get("run_id"))
         path = None
         try:
-            path = self._open_report_cb(int(run.get("run_id")))
+            path = self._open_report_cb(rid)
         except Exception:
             path = None
-        path = path or run.get("report_path")
+
         if path and os.path.exists(path):
             self._open_path(path)
             return
-        path = filedialog.askopenfilename(
-            title="Open report…",
-            initialdir=os.path.abspath("./reports"),
-            filetypes=[("Reports", "*.html *.md *.txt"), ("All files", "*.*")],
-        )
-        if path:
-            self._open_path(path)
+
+        try:
+            from src.reporting.report_builder import generate_report as _gen
+            path = _gen(rid, out_dir="reports", fmt="html")
+            if _store and hasattr(_store, "save_report_path"):
+                try:
+                    _store.save_report_path(rid, path)
+                except Exception:
+                    pass
+            if path and os.path.exists(path):
+                self._open_path(path)
+                return
+        except Exception as e:
+            messagebox.showerror("Open report", f"Failed to generate/open report:\n{e}")
+            return
 
     def _export_config(self):
         run = self._selected_run_details()
@@ -360,7 +367,7 @@ class RunHistory(ttk.Frame):
         path = filedialog.asksaveasfilename(
             title="Export calibrations JSON",
             defaultextension=".json",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            filetypes=[("JSON", "*.json")],
             initialfile=f"run_{run.get('run_id','unknown')}_calibrations.json",
         )
         if not path:
@@ -400,7 +407,6 @@ class RunHistory(ttk.Frame):
             messagebox.showerror("Open report", str(e))
 
     # Defaults (state_store)
-
     def _default_load_runs(self) -> List[Dict[str, Any]]:
         if _store is None or not hasattr(_store, "list_runs"):
             return []
@@ -428,12 +434,33 @@ class RunHistory(ttk.Frame):
                 d["calibrations"] = _store.get_calibrations_for_run(run_id)
             except Exception:
                 pass
+        # summary (preferred)
         if hasattr(_store, "get_run_summary"):
             try:
                 d.update(_store.get_run_summary(run_id) or {})
             except Exception:
                 pass
-        # possible stored report path
+        if (not d.get("pairs_scored")) and hasattr(_store, "get_decisions"):
+            try:
+                rows = _store.get_decisions(run_id, limit=1_000_000)
+                pairs = 0; dup = 0; nd = 0; unc = 0
+                for r in rows:
+                    pairs += 1
+                    try:
+                        tj = json.loads(r["trace_json"])
+                        lab = tj.get("final_label")
+                    except Exception:
+                        lab = None
+                    if lab == "DUPLICATE": dup += 1
+                    elif lab == "NON_DUPLICATE": nd += 1
+                    elif lab == "UNCERTAIN": unc += 1
+                d["pairs_scored"] = pairs
+                d["duplicates"] = dup
+                d["non_duplicates"] = nd
+                d["uncertain"] = unc
+            except Exception:
+                pass
+        # stored report path
         if hasattr(_store, "get_report_path"):
             try:
                 rp = _store.get_report_path(run_id)
@@ -444,9 +471,31 @@ class RunHistory(ttk.Frame):
         return d
 
     def _default_open_report(self, run_id: int) -> Optional[str]:
+        # 1) Stored path
+        path = None
         if _store and hasattr(_store, "get_report_path"):
             try:
-                return _store.get_report_path(run_id)
+                path = _store.get_report_path(run_id)
+            except Exception:
+                path = None
+        if path and os.path.exists(path):
+            return path
+
+        # 2) Generate a fresh report
+        try:
+            from src.reporting.report_builder import generate_report as _gen
+        except Exception:
+            try:
+                from reporting.report_builder import generate_report as _gen
             except Exception:
                 return None
-        return None
+        try:
+            new_path = _gen(run_id, out_dir="reports", fmt="html")
+            if _store and hasattr(_store, "save_report_path"):
+                try:
+                    _store.save_report_path(run_id, new_path)
+                except Exception:
+                    pass
+            return new_path
+        except Exception:
+            return None

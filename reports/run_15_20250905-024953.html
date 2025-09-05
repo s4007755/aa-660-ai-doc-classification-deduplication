@@ -1,0 +1,330 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Run 15 Report</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; color: #1f2937; }
+      h1 { font-size: 24px; margin: 0 0 12px 0; }
+      h2 { font-size: 18px; margin-top: 24px; }
+      code, pre { background: #f9fafb; padding: 8px; border-radius: 6px; display: block; overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+      th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; font-size: 13px; }
+      th { background: #f3f4f6; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 9999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+      .muted { color:#6b7280; }
+    </style>
+    </head>
+<body>
+<h1>Duplicate Detection Report — Run 15</h1>
+<p><span class='pill'>Started</span> 2025-09-05 02:49:37 &nbsp;&nbsp; <span class='pill'>Ended</span> 2025-09-05 02:49:40 &nbsp;&nbsp; <span class="pill">Notes</span> Balanced</p>
+
+<h2>Run summary</h2>
+<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody><tr><td>Total pairs</td><td>9</td></tr><tr><td>Duplicates</td><td>7</td></tr><tr><td>Near-duplicates</td><td>2</td></tr><tr><td>Uncertain</td><td>0</td></tr><tr><td>Consensus rate</td><td>100.0%</td></tr><tr><td>Escalations</td><td>0.0%</td></tr><tr><td>Clusters</td><td>-</td></tr></tbody></table>
+
+<h2>Per-learner metrics</h2>
+<p class='muted'>No per-learner metrics.</p>
+
+<h2>Calibration snapshot</h2>
+<table><thead><tr><th>Learner</th><th>Method</th><th>Threshold</th><th>Brier</th><th>Reliability (center:obs(count))</th></tr></thead><tbody><tr><td>embedding</td><td>isotonic</td><td>1.000</td><td>0.250</td><td>0.05:0.00(0), 0.15:0.00(0), 0.25:0.00(0), 0.35:0.00(0), 0.45:0.00(0), 0.55:0.03(217)</td></tr><tr><td>minhash</td><td>isotonic</td><td>1.000</td><td>0.006</td><td>0.05:0.00(207), 0.15:0.00(1), 0.25:0.00(0), 0.35:0.00(0), 0.45:0.00(0), 0.55:0.00(1)</td></tr><tr><td>simhash</td><td>isotonic</td><td>1.000</td><td>0.245</td><td>0.05:0.00(0), 0.15:0.00(0), 0.25:0.00(0), 0.35:0.00(0), 0.45:0.00(0), 0.55:0.00(209)</td></tr></tbody></table>
+
+<h2>Examples</h2>
+<h3>Easy positives</h3>
+<table><thead><tr><th>Doc A</th><th>Doc B</th><th>Final</th><th>Agreed</th><th>Escalation</th><th>Per-learner probs</th></tr></thead><tbody><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>story.pdf (af650506)</td><td>DUPLICATE</td><td>simhash, minhash, embedding</td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>Animal Farm by George Orwell.pdf (c1fd6613)</td><td>DUPLICATE</td><td>simhash, minhash, embedding</td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>DonaldAlexanderMackenzie.pdf (3f7f671d)</td><td>document1.pdf (50c05952)</td><td>DUPLICATE</td><td>simhash, minhash, embedding</td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>biostat.pdf (4eb62fb0)</td><td>biostat - Copy.pdf (53e16ed0)</td><td>DUPLICATE</td><td>simhash, minhash, embedding</td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>23287-g40.docx (58887850)</td><td>g40.docx (f3ff512a)</td><td>DUPLICATE</td><td>simhash, minhash, embedding</td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr></tbody></table>
+<h3>Hard but resolved (escalated)</h3>
+<p><i>None</i></p>
+<h3>Uncertain</h3>
+<p><i>None</i></p>
+
+<h2>Clusters (from DUPLICATE traces)</h2>
+<table><thead><tr><th>#</th><th>Size</th><th>Members</th><th>Avg prob (simhash|minhash|embed)</th><th>Dispersion (min..max)</th></tr></thead><tbody><tr><td>1</td><td>3</td><td>Animal Farm by George Orwell - Copy.pdf (12552eb1), story.pdf (af650506), Animal Farm by George Orwell.pdf (c1fd6613)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>2</td><td>2</td><td>DonaldAlexanderMackenzie.pdf (3f7f671d), document1.pdf (50c05952)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>3</td><td>2</td><td>biostat.pdf (4eb62fb0), biostat - Copy.pdf (53e16ed0)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>4</td><td>2</td><td>23287-g40.docx (58887850), g40.docx (f3ff512a)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>5</td><td>2</td><td>MasteringTheFundamentalsOfMathematics.pdf (6ccc40ed), maths.pdf (f6fb0eb8)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr></tbody></table>
+
+<h2>Config</h2>
+<pre><code>{
+  "pipeline": {
+    "arbiter": {
+      "require_agreement": 2,
+      "gray_zone_margin": 0.05,
+      "max_escalation_steps": 3,
+      "escalation_order": [
+        "normalize_strict",
+        "minhash_alt_shingle",
+        "embed_whiten"
+      ],
+      "max_self_train_epochs": 2,
+      "strong_margin": 0.07,
+      "random_state": 13,
+      "enable_exact_check": true,
+      "exact_normalization": "unicode_lines"
+    },
+    "candidates": {
+      "use_lsh": true,
+      "shingle_size": 3,
+      "num_perm": 64,
+      "lsh_threshold": 0.6,
+      "max_candidates_per_doc": 2000,
+      "max_total_candidates": null
+    },
+    "bootstrap": {
+      "max_pos_pairs": 50000,
+      "max_neg_pairs": 50000
+    },
+    "self_learning": {
+      "enabled": true,
+      "epochs": 2
+    },
+    "persist": true
+  },
+  "learners": {
+    "simhash": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": 5,
+        "extra_2": 255,
+        "extra_3": 2,
+        "extra_4": false,
+        "extra_5": false
+      }
+    },
+    "minhash": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": 3,
+        "extra_2": 64,
+        "extra_3": 0.6,
+        "extra_4": false
+      }
+    },
+    "embedding": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": "sentence-transformers/all-MiniLM-L6-v2",
+        "extra_2": 64,
+        "extra_3": 0.92,
+        "extra_4": false,
+        "extra_5": false,
+        "extra_6": false
+      }
+    }
+  },
+  "corpus_stats": {
+    "doc_count": 27,
+    "avg_doc_len": 44502.51851851852,
+    "lang_counts": {},
+    "extras": {
+      "top_tokens": [
+        [
+          "can",
+          4851
+        ],
+        [
+          "we",
+          4172
+        ],
+        [
+          "not",
+          4129
+        ],
+        [
+          "●●",
+          3770
+        ],
+        [
+          "if",
+          3243
+        ],
+        [
+          "have",
+          3240
+        ],
+        [
+          "all",
+          2854
+        ],
+        [
+          "data",
+          2758
+        ],
+        [
+          "will",
+          2698
+        ],
+        [
+          "when",
+          2667
+        ],
+        [
+          "which",
+          2656
+        ],
+        [
+          "they",
+          2512
+        ],
+        [
+          "sql",
+          2235
+        ],
+        [
+          "one",
+          2234
+        ],
+        [
+          "use",
+          2191
+        ],
+        [
+          "●●●",
+          2188
+        ],
+        [
+          "more",
+          2084
+        ],
+        [
+          "v2x",
+          2010
+        ],
+        [
+          "there",
+          1979
+        ],
+        [
+          "has",
+          1963
+        ],
+        [
+          "their",
+          1932
+        ],
+        [
+          "figure",
+          1854
+        ],
+        [
+          "had",
+          1848
+        ],
+        [
+          "using",
+          1823
+        ],
+        [
+          "between",
+          1805
+        ],
+        [
+          "than",
+          1788
+        ],
+        [
+          "other",
+          1775
+        ],
+        [
+          "may",
+          1767
+        ],
+        [
+          "number",
+          1764
+        ],
+        [
+          "but",
+          1760
+        ],
+        [
+          "pc5",
+          1746
+        ],
+        [
+          "support",
+          1718
+        ],
+        [
+          "two",
+          1687
+        ],
+        [
+          "company",
+          1686
+        ],
+        [
+          "probability",
+          1672
+        ],
+        [
+          "each",
+          1652
+        ],
+        [
+          "enemy",
+          1641
+        ],
+        [
+          "used",
+          1613
+        ],
+        [
+          "what",
+          1611
+        ],
+        [
+          "he",
+          1578
+        ],
+        [
+          "where",
+          1536
+        ],
+        [
+          "would",
+          1516
+        ],
+        [
+          "application",
+          1481
+        ],
+        [
+          "information",
+          1461
+        ],
+        [
+          "his",
+          1424
+        ],
+        [
+          "should",
+          1422
+        ],
+        [
+          "such",
+          1399
+        ],
+        [
+          "also",
+          1398
+        ],
+        [
+          "any",
+          1351
+        ],
+        [
+          "then",
+          1343
+        ]
+      ],
+      "vocab_size": 80358
+    }
+  }
+}</code></pre>
+</body></html>

@@ -142,17 +142,7 @@ def run_intelligent_pipeline(
                 store.save_learner_state(ln.name, ln.get_state())
         report("self-learning", epochs, epochs)
 
-    # Persist
-    if cfg.persist and run_id != -1:
-        report("persisting", 0, 1)
-        _persist_calibrations(run_id, learners)
-        store.bulk_insert_decisions(run_id, traces)
-        store.end_run(run_id, status="completed")
-        report("persisting", 1, 1)
-
-    # Metrics & snapshots
-
-    # 1 for DUPLICATE, 0 for NON_DUPLICATE, skip UNCERTAIN.
+    # pseudo-labels: 1 for DUPLICATE, 0 for NON_DUPLICATE
     pseudo_labels: Dict[str, int] = {}
     for tr in traces:
         if tr.final_label == "DUPLICATE":
@@ -160,10 +150,10 @@ def run_intelligent_pipeline(
         elif tr.final_label == "NON_DUPLICATE":
             pseudo_labels[tr.pair_key] = 0
 
-    # Metrics snapshot 
+    # Metrics snapshot
     snapshot = metrics_snapshot(traces, pseudo_labels=pseudo_labels)
 
-    # Enrich per-learner section with threshold + target precision for the UI
+    # Enrich per-learner section with thresholds + targets for UI/report
     per_learner = snapshot.setdefault("per_learner", {})
     for ln in learners:
         info = per_learner.setdefault(ln.name, {})
@@ -173,7 +163,7 @@ def run_intelligent_pipeline(
             info["threshold"] = float(cal.threshold)
         info["target_precision"] = float(ln.config.target_precision)
 
-    # Compact calibration snapshot
+    # Compact calibration snapshot for app headers
     calibration_snapshot: Dict[str, Dict[str, Any]] = {}
     for ln in learners:
         st = ln.get_state()
@@ -186,14 +176,52 @@ def run_intelligent_pipeline(
 
     # clusters + run summary
     clusters = build_clusters_from_traces(traces)
-    run_summary = summarize_run(traces)
+    run_summary = summarize_run(traces) or {}
+    run_summary_out = dict(run_summary)
+    try:
+        run_summary_out["clusters"] = len(clusters)
+    except Exception:
+        pass
+
+    # Persist
+    if cfg.persist and run_id != -1:
+        report("persisting", 0, 1)
+        _persist_calibrations(run_id, learners)
+        store.bulk_insert_decisions(run_id, traces)
+
+        # Save run summary
+        try:
+            store.save_run_summary(run_id, run_summary_out)
+        except Exception:
+            pass
+        try:
+            store.save_metrics_snapshot(run_id, snapshot)
+        except Exception:
+            pass
+
+        try:
+            store.end_run(
+                run_id,
+                status="completed",
+                pairs=run_summary.get("total_pairs", run_summary.get("pairs_scored")),
+                duplicates=run_summary.get("duplicates"),
+                non_duplicates=run_summary.get("non_duplicates"),
+                uncertain=run_summary.get("uncertain"),
+                consensus_rate=run_summary.get("consensus_rate", run_summary.get("consensus_pct")),
+                escalations_rate=run_summary.get("escalations_pct", run_summary.get("escalations_rate")),
+                clusters=len(clusters) if isinstance(clusters, list) else None,
+            )
+        except TypeError:
+            store.end_run(run_id, status="completed")
+
+        report("persisting", 1, 1)
 
     return {
         "run_id": run_id,
         "pairs_scored": len(traces),
         "clusters": clusters,
         "traces": traces,
-        "run_summary": run_summary,
+        "run_summary": run_summary_out,
         "metrics_snapshot": snapshot,
         "calibration_snapshot": calibration_snapshot,
     }

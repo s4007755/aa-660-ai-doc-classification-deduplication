@@ -318,7 +318,7 @@ class App(tk.Tk):
                 labels[did] = name
         return labels
 
-    # ---- helper: try to pull calibrated thresholds from result ----
+    # helper: try to pull calibrated thresholds from result
     def _thresholds_from_result(self, res: Dict[str, Any]) -> Dict[str, float]:
         out: Dict[str, float] = {}
         # Look through several possible shapes
@@ -338,7 +338,6 @@ class App(tk.Tk):
                     if thr is not None:
                         out[name.lower()] = float(thr)
         return out
-    # ----------------------------------------------------------------
 
     def _on_run_clicked(self):
         if self.running:
@@ -418,7 +417,7 @@ class App(tk.Tk):
         }
         self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm)
 
-        # ---- NEW: push numbers into learner cards header KPIs ----
+        # push numbers into learner cards header KPIs
         thresholds = self._thresholds_from_result(self.pipeline_result)
         def _num(x):
             try:
@@ -430,7 +429,7 @@ class App(tk.Tk):
         sim_cfg = self.card_sim.get_config()
         sim_brier = _num((per_learner.get("simhash") or {}).get("brier"))
         self.card_sim.set_header_metrics(
-            est_precision=sim_cfg.target_precision,  # show your target as proxy
+            est_precision=sim_cfg.target_precision,
             threshold=thresholds.get("simhash"),
             brier=sim_brier,
             target_precision=sim_cfg.target_precision,
@@ -449,7 +448,6 @@ class App(tk.Tk):
         # embedding
         emb_cfg = self.card_emb.get_config()
         emb_brier = _num((per_learner.get("embedding") or {}).get("brier"))
-        # try to fall back to configured cosine_threshold if no calibrated threshold present
         emb_thr = thresholds.get("embedding")
         if emb_thr is None:
             try:
@@ -462,7 +460,6 @@ class App(tk.Tk):
             brier=emb_brier,
             target_precision=emb_cfg.target_precision,
         )
-        # -----------------------------------------------------------
 
         # Refresh history tab
         try:

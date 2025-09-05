@@ -68,7 +68,7 @@ class LearnerCard(ttk.Frame):
         if self._desc_text:
             ttk.Label(header, text=self._desc_text, foreground="#888").pack(side=tk.LEFT, padx=(8, 0))
 
-        # calibration snapshot
+        # calibration
         self._calib = {
             "precision": ttk.Label(header, text="est. precision: —"),
             "threshold": ttk.Label(header, text="thr: —"),
@@ -90,7 +90,7 @@ class LearnerCard(ttk.Frame):
                   command=lambda *_: self._sync_scale_label(tp_lbl)).grid(row=row, column=1, sticky="we", padx=6)
         tp_lbl.grid(row=row, column=2, sticky="e", padx=6)
 
-        # Min confidence row (optional)
+        # Min confidence row
         if self._show_min_conf:
             row += 1
             ttk.Label(core, text="Min confidence").grid(row=row, column=0, sticky="w", padx=6, pady=4)
@@ -159,6 +159,44 @@ class LearnerCard(ttk.Frame):
         for _, var in self.extras_vars.items():
             var.trace_add("write", lambda *_: self._emit_change())
 
+    # Header KPI setters
+    def set_header_metrics(
+        self,
+        *,
+        est_precision: Optional[float] = None,
+        threshold: Optional[float] = None,
+        brier: Optional[float] = None,
+        target_precision: Optional[float] = None,
+    ) -> None:
+        def fmt(x, pat="{:.3f}"):
+            try:
+                return pat.format(float(x))
+            except Exception:
+                return "—"
+
+        # est. precision
+        if est_precision is None and target_precision is None:
+            prec_txt = "est. precision: —"
+        elif est_precision is None:
+            prec_txt = f"est. precision: — (target {fmt(target_precision)})"
+        else:
+            if target_precision is None:
+                prec_txt = f"est. precision: {fmt(est_precision)}"
+            else:
+                prec_txt = f"est. precision: {fmt(est_precision)} (target {fmt(target_precision)})"
+        self._calib["precision"].configure(text=prec_txt)
+
+        # threshold & brier
+        self._calib["threshold"].configure(text=f"thr: {fmt(threshold)}")
+        self._calib["brier"].configure(text=f"brier: {fmt(brier)}")
+
+    # Back-compat aliases
+    def set_estimates(self, **kwargs):
+        self.set_header_metrics(**kwargs)
+
+    def set_kpis(self, **kwargs):
+        self.set_header_metrics(**kwargs)
+
     # calibration snapshot setters
     def set_calibration(self, cal: Optional[CalibrationParams]) -> None:
         if cal is None:
@@ -166,11 +204,10 @@ class LearnerCard(ttk.Frame):
             self._calib["threshold"].configure(text="thr: —")
             self._calib["brier"].configure(text="brier: —")
             return
-        thr = cal.threshold if cal.threshold is not None else float("nan")
-        brier = cal.brier_score if cal.brier_score is not None else float("nan")
-        self._calib["precision"].configure(text=f"est. precision: target")
-        self._calib["threshold"].configure(text=f"thr: {thr:.3f}")
-        self._calib["brier"].configure(text=("brier: —" if (brier != brier) else f"brier: {brier:.3f}"))
+        thr = cal.threshold if cal.threshold is not None else None
+        brier = cal.brier_score if cal.brier_score is not None else None
+        tprec = self.var_target_precision.get()
+        self.set_header_metrics(est_precision=None, threshold=thr, brier=brier, target_precision=tprec)
 
     # get/set config
     def get_config(self) -> LearnerConfig:
@@ -250,6 +287,7 @@ class LearnerCard(ttk.Frame):
 
     def _set_extras(self, extras: Dict[str, Any]):
         keys = self._known_extra_keys()
+        # re-key once so callers can pass dicts with natural keys
         if len(self.extras_vars) == len(keys):
             for (k, var), name in zip(list(self.extras_vars.items()), keys):
                 self.extras_vars[name] = self.extras_vars.pop(k)

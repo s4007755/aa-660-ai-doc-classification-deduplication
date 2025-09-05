@@ -153,7 +153,7 @@ class App(tk.Tk):
 
         left_scroller = VScrollFrame(left_wrap)
         left_scroller.pack(fill=tk.BOTH, expand=True)
-        left = left_scroller.inner
+        left = left_scroller.inner   # place controls inside this frame
 
         # Profiles row
         prof = ttk.LabelFrame(left, text="Profile")
@@ -318,6 +318,28 @@ class App(tk.Tk):
                 labels[did] = name
         return labels
 
+    # ---- helper: try to pull calibrated thresholds from result ----
+    def _thresholds_from_result(self, res: Dict[str, Any]) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        # Look through several possible shapes
+        candidates = []
+        for k in ("calibration_snapshot", "calibration", "learner_states", "learners"):
+            snap = res.get(k)
+            if isinstance(snap, dict):
+                candidates.append(snap)
+        for snap in candidates:
+            for name, info in snap.items():
+                if isinstance(info, dict):
+                    thr = (
+                        info.get("threshold")
+                        or (info.get("calibration") or {}).get("threshold")
+                        or info.get("thr")
+                    )
+                    if thr is not None:
+                        out[name.lower()] = float(thr)
+        return out
+    # ----------------------------------------------------------------
+
     def _on_run_clicked(self):
         if self.running:
             return
@@ -388,12 +410,59 @@ class App(tk.Tk):
             run_summary = dict(run_summary)
             run_summary["escalations_rate"] = run_summary["escalations_pct"]
 
+        per_learner = raw_snap.get("per_learner", {})  # AUC/Brier/etc from pseudo labels
         snap_norm = {
-            "learners": raw_snap.get("per_learner", {}),
+            "learners": per_learner,
             "run": run_summary,
             "clusters": raw_snap.get("clusters", []),
         }
         self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm)
+
+        # ---- NEW: push numbers into learner cards header KPIs ----
+        thresholds = self._thresholds_from_result(self.pipeline_result)
+        def _num(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        # simhash
+        sim_cfg = self.card_sim.get_config()
+        sim_brier = _num((per_learner.get("simhash") or {}).get("brier"))
+        self.card_sim.set_header_metrics(
+            est_precision=sim_cfg.target_precision,  # show your target as proxy
+            threshold=thresholds.get("simhash"),
+            brier=sim_brier,
+            target_precision=sim_cfg.target_precision,
+        )
+
+        # minhash
+        min_cfg = self.card_min.get_config()
+        min_brier = _num((per_learner.get("minhash") or {}).get("brier"))
+        self.card_min.set_header_metrics(
+            est_precision=min_cfg.target_precision,
+            threshold=thresholds.get("minhash"),
+            brier=min_brier,
+            target_precision=min_cfg.target_precision,
+        )
+
+        # embedding
+        emb_cfg = self.card_emb.get_config()
+        emb_brier = _num((per_learner.get("embedding") or {}).get("brier"))
+        # try to fall back to configured cosine_threshold if no calibrated threshold present
+        emb_thr = thresholds.get("embedding")
+        if emb_thr is None:
+            try:
+                emb_thr = float(emb_cfg.extras.get("cosine_threshold"))
+            except Exception:
+                emb_thr = None
+        self.card_emb.set_header_metrics(
+            est_precision=emb_cfg.target_precision,
+            threshold=emb_thr,
+            brier=emb_brier,
+            target_precision=emb_cfg.target_precision,
+        )
+        # -----------------------------------------------------------
 
         # Refresh history tab
         try:
@@ -412,7 +481,7 @@ class App(tk.Tk):
             pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs') or '—'
             lines.append(f"Pairs: {pairs}")
             lines.append(f"Duplicates: {rs.get('duplicates', '—')}")
-            lines.append(f"Near-duplicates: {rs.get('non_duplicates', '—')}")
+            lines.append(f"Non-duplicates: {rs.get('non_duplicates', '—')}")
             lines.append(f"Uncertain: {rs.get('uncertain', '—')}")
             cr = rs.get("consensus_rate")
             er = rs.get("escalations_rate") or rs.get("escalations_pct")

@@ -23,6 +23,7 @@ from src.metrics.metrics import summarize_run, metrics_snapshot
 
 ProgressCB = Optional[Callable[[int, int, str], None]]
 
+
 @dataclass
 class CandidateConfig:
     use_lsh: bool = True
@@ -32,15 +33,18 @@ class CandidateConfig:
     max_candidates_per_doc: int = 2000
     max_total_candidates: Optional[int] = None
 
+
 @dataclass
 class BootstrapConfig:
     max_pos_pairs: int = 50_000
     max_neg_pairs: int = 50_000
 
+
 @dataclass
 class SelfLearningConfig:
     enabled: bool = True
     epochs: int = 2
+
 
 @dataclass
 class PipelineConfig:
@@ -52,6 +56,7 @@ class PipelineConfig:
     bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
     self_learning: SelfLearningConfig = field(default_factory=SelfLearningConfig)
     persist: bool = True
+
 
 def run_intelligent_pipeline(
     docs: Iterable[DocumentView],
@@ -84,7 +89,7 @@ def run_intelligent_pipeline(
     stats: CorpusStats = compute_corpus_stats(docs_list)
     arb.prepare(stats)
 
-    # Calibration
+    # Calibration bootstrap
     report("calibration/bootstrap/prepare", 0, 1)
     pos, neg = _build_easy_bootstrap(
         docs_list,
@@ -94,12 +99,12 @@ def run_intelligent_pipeline(
     )
     report("calibration/bootstrap/done", 1, 1)
 
+    # Fit & persist per-learner calibration
     for ln in learners:
         phase = f"calibration/{ln.name}"
         report(phase, 0, 1)
         try:
             ln.fit_calibration(pos, neg)
-            # persist after each learner
             store.save_learner_state(ln.name, ln.get_state())
         finally:
             report(phase, 1, 1)
@@ -145,10 +150,43 @@ def run_intelligent_pipeline(
         store.end_run(run_id, status="completed")
         report("persisting", 1, 1)
 
-    # clusters + metrics
+    # Metrics & snapshots
+
+    # 1 for DUPLICATE, 0 for NON_DUPLICATE, skip UNCERTAIN.
+    pseudo_labels: Dict[str, int] = {}
+    for tr in traces:
+        if tr.final_label == "DUPLICATE":
+            pseudo_labels[tr.pair_key] = 1
+        elif tr.final_label == "NON_DUPLICATE":
+            pseudo_labels[tr.pair_key] = 0
+
+    # Metrics snapshot 
+    snapshot = metrics_snapshot(traces, pseudo_labels=pseudo_labels)
+
+    # Enrich per-learner section with threshold + target precision for the UI
+    per_learner = snapshot.setdefault("per_learner", {})
+    for ln in learners:
+        info = per_learner.setdefault(ln.name, {})
+        st = ln.get_state()
+        cal = getattr(st, "calibration", None)
+        if cal and cal.threshold is not None:
+            info["threshold"] = float(cal.threshold)
+        info["target_precision"] = float(ln.config.target_precision)
+
+    # Compact calibration snapshot
+    calibration_snapshot: Dict[str, Dict[str, Any]] = {}
+    for ln in learners:
+        st = ln.get_state()
+        cal = getattr(st, "calibration", None)
+        calibration_snapshot[ln.name] = {
+            "method": getattr(cal, "method", None),
+            "threshold": getattr(cal, "threshold", None),
+            "brier": getattr(cal, "brier_score", None),
+        }
+
+    # clusters + run summary
     clusters = build_clusters_from_traces(traces)
     run_summary = summarize_run(traces)
-    snapshot = metrics_snapshot(traces, pseudo_labels={})
 
     return {
         "run_id": run_id,
@@ -157,6 +195,7 @@ def run_intelligent_pipeline(
         "traces": traces,
         "run_summary": run_summary,
         "metrics_snapshot": snapshot,
+        "calibration_snapshot": calibration_snapshot,
     }
 
 
@@ -168,10 +207,12 @@ def _build_easy_bootstrap(
     max_neg: int,
     progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> Tuple[List[Tuple[DocumentView, DocumentView]], List[Tuple[DocumentView, DocumentView]]]:
-    def p(d, t, s): 
+    def p(d, t, s):
         if progress:
-            try: progress(d, t, s)
-            except Exception: pass
+            try:
+                progress(d, t, s)
+            except Exception:
+                pass
 
     # Group by exact normalized text
     p(0, 3, "group")
@@ -180,7 +221,7 @@ def _build_easy_bootstrap(
         groups.setdefault(d.text or "", []).append(d)
     p(1, 3, "group")
 
-    # Positives: all pairs within each group (capped)
+    # Positives: all pairs within each group
     pos: List[Tuple[DocumentView, DocumentView]] = []
     for g in groups.values():
         n = len(g)
@@ -208,15 +249,19 @@ def _build_easy_bootstrap(
 
     return pos, neg
 
+
 def build_clusters_from_traces(traces: Iterable[DecisionTrace]) -> List[List[str]]:
     parent: Dict[str, str] = {}
+
     def find(x: str) -> str:
         parent.setdefault(x, x)
         if parent[x] != x:
             parent[x] = find(parent[x])
         return parent[x]
+
     def union(a: str, b: str) -> None:
         parent[find(a)] = find(b)
+
     for tr in traces:
         if tr.final_label == "DUPLICATE":
             union(tr.a_id, tr.b_id)
@@ -232,6 +277,7 @@ def build_clusters_from_traces(traces: Iterable[DecisionTrace]) -> List[List[str
             out.append(uniq)
     out.sort(key=lambda c: (-len(c), c[0]))
     return out
+
 
 def generate_candidates(docs: List[DocumentView], ccfg: CandidateConfig) -> List[Tuple[str, str]]:
     tok_map: Dict[str, List[str]] = {d.doc_id: (d.tokens if d.tokens is not None else tokenize_words(d.text)) for d in docs}
@@ -281,9 +327,11 @@ def generate_candidates(docs: List[DocumentView], ccfg: CandidateConfig) -> List
                 return pairs
     return pairs
 
+
 def _maybe_load(learner) -> None:
     st = store.load_learner_state(learner.name)
     learner.load_state(st)
+
 
 def _persist_calibrations(run_id: int, learners: List[Any]) -> None:
     for ln in learners:
@@ -293,6 +341,7 @@ def _persist_calibrations(run_id: int, learners: List[Any]) -> None:
         params_json = json.dumps(cal.params or {}, ensure_ascii=False)
         reliability_json = json.dumps(cal.reliability_bins or [], ensure_ascii=False)
         store.save_calibration(run_id, ln.name, method, params_json, reliability_json)
+
 
 def _export_run_config(cfg: PipelineConfig, stats: CorpusStats) -> Dict[str, Any]:
     return {

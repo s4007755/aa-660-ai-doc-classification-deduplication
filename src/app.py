@@ -78,7 +78,7 @@ class App(tk.Tk):
     # Main window
     def __init__(self):
         super().__init__()
-        self.title("Intelligent Duplicate Finder")
+        self.title("Duplicate Finder")
         self.geometry("1360x900")
         self.minsize(1200, 760)
 
@@ -107,13 +107,13 @@ class App(tk.Tk):
         self.tab_history = ttk.Frame(nb)
         self.tab_docs = ttk.Frame(nb)
 
-        nb.add(self.tab_mode, text="Intelligent Mode")
+        nb.add(self.tab_mode, text="Main")
         nb.add(self.tab_traces, text="Decision Traces")
         nb.add(self.tab_metrics, text="Metrics")
         nb.add(self.tab_history, text="Run History")
         nb.add(self.tab_docs, text="Documents")
 
-        # Intelligent Mode tab
+        # Main tab
         self._build_mode_tab(self.tab_mode)
         # Decision Traces tab
         self.trace_view = TraceViewer(self.tab_traces, text="Decision Traces")
@@ -127,7 +127,7 @@ class App(tk.Tk):
         # Documents tab
         self._build_docs_tab(self.tab_docs)
 
-    # Intelligent Mode content
+    # Main content
     def _build_mode_tab(self, parent: ttk.Frame):
         # Toolbar
         bar = ttk.Frame(parent, padding=8)
@@ -138,7 +138,7 @@ class App(tk.Tk):
 
         ttk.Button(bar, text="Refresh docs", command=lambda: [self._refresh_docs_from_db(), self._refresh_docs_tab()]).pack(side=tk.LEFT, padx=(10, 0))
 
-        self.btn_run = ttk.Button(bar, text="Run Intelligent Mode", command=self._on_run_clicked)
+        self.btn_run = ttk.Button(bar, text="Run", command=self._on_run_clicked)
         self.btn_run.pack(side=tk.RIGHT)
 
         # Split: left controls / right status

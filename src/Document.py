@@ -4,7 +4,7 @@ import hashlib
 import pdfplumber
 from docx import Document as DocxDocument
 from pympler import asizeof
-
+import fitz
 
 class Document:
 
@@ -54,12 +54,11 @@ class Document:
                 content = "\n".join(p.text for p in doc.paragraphs)
 
             elif self.extension == "pdf":
-                with pdfplumber.open(file) as pdf:
-                    content = "\n".join(
-                        page.extract_text()
-                        for page in pdf.pages
-                        if page.extract_text()
-                    )
+                text_chunks = []
+                doc = fitz.open(self.path)
+                for page in doc:
+                    text_chunks.append(page.get_text())
+                content = "\n".join(text_chunks)
 
             self.content = content
 
@@ -81,8 +80,8 @@ class Document:
             }
 
         elif self.extension == "pdf":
-            with pdfplumber.open(file) as pdf:
-                return dict(pdf.metadata)
+            with fitz.open(self.path) as doc:
+                return doc.metadata or {}
 
         return {}
 

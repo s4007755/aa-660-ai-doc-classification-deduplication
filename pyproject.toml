@@ -1,58 +1,66 @@
-[project]
-name = "aa660-doc-ai"
-version = "0.1.0"
-description = "Prototype pipelines for document classification and duplicate/near-duplicate detection (AA-660, RMIT x Search Sensei)"
-authors = [
-    { name = "AA-660 Team", email = "team@example.com" }
-]
-requires-python = ">=3.10"
-
-dependencies = [
-    # API & web server
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.6.0",
-
-    # Data handling
-    "numpy>=1.26.0",
-    "pandas>=2.2.0",
-    "scikit-learn>=1.4.0",
-
-    # NLP & similarity
-    "sentence-transformers>=2.5.0",
-    "hdbscan>=0.8.33",
-    "datasketch>=1.5.0",
-
-    # Document parsing
-    "pymupdf>=1.23.0",         # PDFs
-    "python-docx>=1.1.0",      # DOCX
-    "trafilatura>=1.9.0",      # HTML extraction
-
-    # Testing
-    "pytest>=8.0.0",
-    "pytest-cov>=4.1.0"
-]
-
-[project.optional-dependencies]
-dev = [
-    "black>=24.4.0",
-    "isort>=5.13.0",
-    "ruff>=0.5.0",
-    "pre-commit>=3.7.0"
-]
-
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.black]
-line-length = 100
-target-version = ["py310"]
+[project]
+name = "aa660-doc-ai"
+version = "0.1.0"
+description = "Document classification and deduplication system with FastAPI"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
 
-[tool.isort]
-profile = "black"
-line_length = 100
+dependencies = [
+    "numpy>=1.23,<3.0",
+    "scipy>=1.9,<2.0",
+    "scikit-learn>=1.3,<2.0",
+
+    "simhash>=2.1.2",
+    "datasketch>=1.6.5",
+
+    "sentence-transformers>=2.6",
+    "transformers>=4.40",
+    "torch>=2.2",
+    "langdetect>=1.0.9",
+
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+
+    "jinja2>=3.1",
+    "markdown>=3.4",
+    "matplotlib>=3.8",
+    "regex>=2023.0",
+    "PyYAML>=6.0",
+    "pydantic>=2.5",
+    "python-docx>=1.1.0",
+    "pypdf2>=3.0.1",
+    "pillow>=10.0",
+    "lxml>=4.9",
+
+    "tqdm>=4.65",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "httpx>=0.27",  # for FastAPI endpoint tests
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-select = ["E", "F", "B", "I", "UP"]
+target-version = "py39"
+
+[tool.mypy]
+python_version = "3.9"
+strict = true

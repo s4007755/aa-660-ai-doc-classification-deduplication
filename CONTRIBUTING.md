@@ -8,7 +8,7 @@ This project is a document classification and deduplication system built with **
    ```bash
    python -m venv .venv
    source .venv/bin/activate
-   .venv\Scripts\activate
+   .venv\Scripts\activate.ps1
 3. Install dependencies:
     pip install -e .[dev]
 

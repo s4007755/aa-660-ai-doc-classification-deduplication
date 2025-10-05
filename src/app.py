@@ -1,13 +1,20 @@
 # src/app.py
 from __future__ import annotations
 
+import hashlib
 import os
+import random
+import time
 import threading
 import traceback
 from typing import Any, Dict, List, Optional, Iterable
+import sqlite3
+from pathlib import Path
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+import pandas as pd  # CSV support ADDED
 
 # Storage and pipeline
 from src.storage import sqlite_store
@@ -277,32 +284,61 @@ class App(tk.Tk):
         self.docs = [build_document_view(doc_id=did, text=(txt or ""), language=None, meta={}) for (did, txt) in pairs if (txt or "").strip()]
         self.lbl_docs.configure(text=f"Docs: {len(self.docs)}")
 
+    # CSV ingestion ADDED
+    def _on_add_csv(self):  # CSV SUPPORT ADDED
+        file_path = filedialog.askopenfilename(title="Select CSV file", filetypes=[("CSV Files", "*.csv")])
+        if not file_path:
+            return
+        df = pd.read_csv(file_path)
+        text_col = "text"
+        id_col = "id" if "id" in df.columns else None
+        docs = []
+        for i, row in df.iterrows():
+            doc_id = str(row[id_col]) if id_col else str(i)
+            text = row[text_col]
+            if not text or not str(text).strip():
+                continue
+            docs.append(build_document_view(doc_id=doc_id, text=normalize_text(str(text)), language=None, meta={}))
+        self.docs = docs
+        self.lbl_docs.configure(text=f"Docs: {len(self.docs)}")
+        self._csv_loaded = True  # flag to skip DB refresh
+        self._refresh_docs_tab()
+
     # Fill docs tab table
     def _refresh_docs_tab(self):
-        try:
-            rows = sqlite_store.get_all_document_files()
-        except Exception as e:
-            messagebox.showerror("DB error", str(e))
-            return
-
-        # clear
+    # clear existing
         for iid in self.docs_tree.get_children():
             self.docs_tree.delete(iid)
 
-        # fill
-        for r in rows:
-            doc_id = r.get("doc_id", "")
-            lang = r.get("language") or "—"
-            size_kb = int((r.get("filesize") or 0) / 1024)
-            fname = r.get("filename") or "—"
-            fpath = r.get("filepath") or ""
-            self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
+        if getattr(self, "_csv_loaded", False):
+            # show CSV docs
+            for d in self.docs:
+                self.docs_tree.insert(
+                    "", tk.END,
+                    values=(d.doc_id, f"csv_row_{d.doc_id}", "—", len(d.text) // 1024, "CSV import")
+                )
+            self.lbl_doc_count.configure(text=f"{len(self.docs)} rows from CSV")
+        else:
+            # fall back to DB
+            try:
+                rows = sqlite_store.get_all_document_files()
+            except Exception as e:
+                messagebox.showerror("DB error", str(e))
+                return
 
-        # label: N files across M docs
-        unique_docs = len({r.get("doc_id") for r in rows})
-        self.lbl_doc_count.configure(text=f"{len(rows)} files across {unique_docs} docs")
+            for r in rows:
+                doc_id = r.get("doc_id", "")
+                lang = r.get("language") or "—"
+                size_kb = int((r.get("filesize") or 0) / 1024)
+                fname = r.get("filename") or "—"
+                fpath = r.get("filepath") or ""
+                self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
 
-        self._refresh_docs_from_db()
+            unique_docs = len({r.get("doc_id") for r in rows})
+            self.lbl_doc_count.configure(text=f"{len(rows)} files across {unique_docs} docs")
+
+            self._refresh_docs_from_db()
+
 
     # helper: map doc_id -> filename (for trace labels)
     def _doc_labels_from_db(self) -> Dict[str, str]:
@@ -694,6 +730,78 @@ class App(tk.Tk):
 def main():
     App().mainloop()
 
+# import first 500 rows from a CSV file with text column field only, can be modified to try higher number of rows
+def import_rows_from_csv(csv_path="dataset/First500.csv"):
+    try:
+        df = pd.read_csv(csv_path, nrows=500)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        return
+
+    if "text" not in df.columns:
+        print("❌ CSV must have a 'text' column.")
+        print(f"Found columns: {df.columns.tolist()}")
+        return
+
+    sqlite_store.init_db()  # ensure DB schema exists
+
+    for i, row in df.iterrows():
+        text = str(row["text"]) if pd.notna(row.get("text", "")) else ""
+        if not text.strip():
+            continue
+
+        doc_id = hashlib.sha1(f"csv_row_{i}_{time.time_ns()}".encode()).hexdigest()
+        
+        norm = normalize_text(text)
+
+        meta = {
+            "language": "en",
+            "filesize": len(text.encode("utf-8")),  # accurate file size in bytes
+        }
+
+        sqlite_store.upsert_document(
+            doc_id=doc_id,
+            raw_text=text,
+            normalized_text=norm,
+            meta=meta,
+        )
+
+        fake_path = os.path.abspath(csv_path)
+        mtime_ns = time.time_ns()
+        sqlite_store.add_file_mapping(doc_id, fake_path, mtime_ns)
+
+    print("✅ Imported first 30 CSV rows into database (text column only).")
+
+# Optional: export all text rows to a single text file for cross checking
+""" 
+def export_csv_text_to_single_file(csv_path="dataset/First500.csv", output_filename="all_text_rows.txt"):
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"❌ Error reading CSV: {e}")
+        return
+
+    if "text" not in df.columns:
+        print(f"❌ CSV must have a 'text' column. Found: {df.columns.tolist()}")
+        return
+
+    # Build output path (data/raw relative to src/)
+    out_dir = Path(__file__).resolve().parent.parent / "data" / "raw"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / output_filename
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        for i, row in df.iterrows():
+            text = str(row["text"]) if pd.notna(row.get("text", "")) else ""
+            if not text.strip():
+                continue
+            # Sequentially numbered, indented for readability
+            f.write(f"{i + 1}. {text.strip()}\n\n")
+
+    print(f"✅ Exported {len(df)} rows to {out_file}")
+    """
 
 if __name__ == "__main__":
+    import_rows_from_csv() # Comment out as needed to test
+    # export_csv_text_to_single_file()
     main()

@@ -12,8 +12,14 @@ def directory_enumerator(dir_path: str, extensions: list[str], limit:int=None) -
             matching_files.append(full_path)
 
             count = len(matching_files)
-            sys.stdout.write(f"\rFound: {count}/{total} -> {full_path}")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(f"\rFound: {count}/{total} -> {full_path}")
+                sys.stdout.flush()
+            except UnicodeEncodeError:
+                # Handle Unicode characters in file paths
+                safe_path = full_path.encode('ascii', 'replace').decode('ascii')
+                sys.stdout.write(f"\rFound: {count}/{total} -> {safe_path}")
+                sys.stdout.flush()
 
             if limit is not None and count >= limit:
                 break

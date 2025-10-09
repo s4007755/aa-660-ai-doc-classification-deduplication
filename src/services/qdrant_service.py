@@ -396,15 +396,16 @@ class QdrantService:
                 except:
                     return 1
     
-    def insert_vectors(self, collection_name: str, vectors: List[List[float]], payloads: List[Dict[str, Any]], batch_size: int = 1000) -> Tuple[bool, int, int]:
+    def insert_vectors(self, collection_name: str, vectors: List[List[float]], payloads: List[Dict[str, Any]], batch_size: int = 1000, sqlite_service=None) -> Tuple[bool, int, int]:
         """
-        Insert vectors into a collection with batch processing.
+        Insert vectors into a collection with batch processing and duplicate checking.
         
         Args:
             collection_name: Collection name
             vectors: List of vector embeddings
             payloads: List of payload dictionaries
             batch_size: Number of vectors to insert per batch
+            sqlite_service: Optional SQLite service for duplicate checking
             
         Returns:
             Tuple of (success, inserted_count, skipped_count)
@@ -418,16 +419,47 @@ class QdrantService:
                 self.log("Vectors and payloads must have equal, non-empty lengths.", True)
                 return False, 0, 0
             
-            # Reserve a unique ID range atomically for the entire insertion set
-            start_id = self._reserve_id_block(collection_name, len(vectors))
+            # Filter out duplicates if SQLite service is provided
+            filtered_vectors = []
+            filtered_payloads = []
+            duplicate_hashes = []
+            
+            if sqlite_service:
+                self.log("Checking for duplicates using SQLite hash index...")
+                for vec, payload in zip(vectors, payloads):
+                    if 'hash' in payload:
+                        hash_value = payload['hash']
+                        if sqlite_service.is_duplicate(collection_name, hash_value):
+                            duplicate_hashes.append(hash_value)
+                        else:
+                            filtered_vectors.append(vec)
+                            filtered_payloads.append(payload)
+                    else:
+                        # If no hash in payload, include it (shouldn't happen with proper processing)
+                        filtered_vectors.append(vec)
+                        filtered_payloads.append(payload)
+                
+                if duplicate_hashes:
+                    self.log(f"Skipped {len(duplicate_hashes)} duplicate documents")
+            else:
+                # No duplicate checking, use all vectors
+                filtered_vectors = vectors
+                filtered_payloads = payloads
+            
+            if not filtered_vectors:
+                self.log("No new vectors to insert after duplicate filtering.")
+                return True, 0, len(duplicate_hashes)
+            
+            # Reserve a unique ID range atomically for the filtered insertion set
+            start_id = self._reserve_id_block(collection_name, len(filtered_vectors))
             
             total_inserted = 0
-            total_skipped = 0
+            total_skipped = len(duplicate_hashes)
             
-            # Process vectors in batches to avoid payload size limits
-            for i in range(0, len(vectors), batch_size):
-                batch_vectors = vectors[i:i + batch_size]
-                batch_payloads = payloads[i:i + batch_size]
+            # Process filtered vectors in batches to avoid payload size limits
+            for i in range(0, len(filtered_vectors), batch_size):
+                batch_vectors = filtered_vectors[i:i + batch_size]
+                batch_payloads = filtered_payloads[i:i + batch_size]
                 
                 points = []
                 batch_inserted = 0
@@ -448,7 +480,12 @@ class QdrantService:
                     try:
                         self.client.upsert(collection_name=collection_name, points=points)
                         total_inserted += batch_inserted
-                        self.log(f"Inserted batch {i//batch_size + 1}/{(len(vectors) + batch_size - 1)//batch_size} ({batch_inserted} vectors)")
+                        self.log(f"Inserted batch {i//batch_size + 1}/{(len(filtered_vectors) + batch_size - 1)//batch_size} ({batch_inserted} vectors)")
+                        # After a successful upsert, record hashes for this batch only
+                        if sqlite_service:
+                            batch_hashes = [p.get('hash') for p in batch_payloads if isinstance(p, dict) and 'hash' in p]
+                            if batch_hashes:
+                                sqlite_service.mark_as_processed(collection_name, batch_hashes)
                         batch_success = True
                         break
                     except Exception as e:

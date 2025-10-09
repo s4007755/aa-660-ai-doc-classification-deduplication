@@ -112,10 +112,26 @@ class Cli:
                 self.log("No vectors found in collection.", True)
                 return
             
+            
             vectors = np.array([point['vector'] for point in points_list])
             point_ids = [int(point['id']) for point in points_list]
             
             self.log(f"Retrieved {len(vectors)} vectors for clustering...")
+            
+            # Filter out zero vectors (metadata vectors) which cause issues with cosine similarity
+            non_zero_mask = np.any(vectors != 0, axis=1)
+            zero_vector_count = len(vectors) - np.sum(non_zero_mask)
+            
+            if zero_vector_count > 0:
+                self.log(f"Found {zero_vector_count} metadata vectors (zero vectors), skipping them for clustering...")
+                vectors = vectors[non_zero_mask]
+                point_ids = [point_ids[i] for i in range(len(point_ids)) if non_zero_mask[i]]
+            
+            if len(vectors) == 0:
+                self.log("No valid document vectors found for clustering.", True)
+                return
+            
+            self.log(f"Using {len(vectors)} document vectors for clustering...")
             
             # Perform clustering
             if num_clusters is not None:
@@ -148,16 +164,22 @@ class Cli:
                 
                 self.log(f"Using distance threshold: {distance_threshold:.3f}")
                 
+                # Use precomputed distance matrix to avoid cosine metric issues with zero vectors
+                # Calculate full distance matrix for all vectors
+                self.log("Computing distance matrix...")
+                full_distances = cosine_distances(vectors)
+                
                 agglo = AgglomerativeClustering(
                     n_clusters=None,  # Let distance threshold determine clusters
                     distance_threshold=distance_threshold,
                     linkage='average',  # Average linkage works well for text
-                    metric='cosine'    # Cosine similarity for embeddings
+                    metric='precomputed'  # Use precomputed distance matrix
                 )
-                cluster_labels = agglo.fit_predict(vectors)
+                cluster_labels = agglo.fit_predict(full_distances)
             
             # Update vectors with cluster assignments using QdrantService
             self.log("Updating vectors with cluster assignments...")
+            
             # Group point ids by cluster to minimize set_payload calls
             cluster_to_point_ids = {}
             for pid, cid in zip(point_ids, cluster_labels):
@@ -771,6 +793,36 @@ class Cli:
                 self.log(f"Failed to create collection '{name}'", True)
             return
         
+        elif cmd == "rm":
+            # Remove a collection from Qdrant and clear its SQLite hash table
+            parser = NoExitArgParser(prog="rm", add_help=False)
+            parser.add_argument("name", nargs="?", help="Collection name (defaults to current)")
+            parser.add_argument("--yes", "-y", action="store_true", help="Confirm deletion without prompt")
+            try:
+                opts = parser.parse_args(args)
+                target = opts.name or self.collection
+                if not target:
+                    self.log("No collection specified or selected.", True)
+                    return
+                if not opts.yes:
+                    confirm = input(f"This will delete collection '{target}' and its dedup index. Type 'yes' to confirm: ").strip().lower()
+                    if confirm != "yes":
+                        self.log("Deletion cancelled.")
+                        return
+                # Delete Qdrant collection (best-effort)
+                q_ok = self.qdrant_service.delete_collection(target)
+                # Clear SQLite table regardless of Qdrant outcome
+                s_ok = self.sqlite_service.clear_collection(target)
+                if q_ok:
+                    self.log(f"Deleted collection '{target}' from Qdrant")
+                else:
+                    self.log(f"Qdrant deletion reported failure for '{target}'", True)
+                # SQLiteService logs its own result; avoid duplicate CLI message
+                if self.collection == target:
+                    self.collection = None
+            except ValueError as e:
+                self.log(f"Invalid rm arguments: {e}. Usage: rm [name] [--yes]", True)
+
 
         elif cmd == "source":
             if self.collection is None:
@@ -896,6 +948,7 @@ class Cli:
             help_table.add_row("  show", "Show current collection and connection status")
             help_table.add_row("  ls", "List all available collections")
             help_table.add_row("  create <name> [model] [-d]", "Create collection with optional model and description")
+            help_table.add_row("  rm [name] [--yes]", "Delete a collection and clear its SQLite hash index (with confirmation)")
             
             # Data operations
             help_table.add_row("", "")
@@ -945,24 +998,51 @@ class Cli:
                 self.log("No data loaded from source.", True)
                 return
 
-            self.log(f"Loaded {len(texts)} items. Generating embeddings...")
+            self.log(f"Loaded {len(texts)} items. Checking for duplicates...")
+
+            # Check for duplicates before generating embeddings
+            filtered_texts = []
+            filtered_payloads = []
+            duplicate_count = 0
+            
+            for text, payload in zip(texts, payloads):
+                if 'hash' in payload:
+                    hash_value = payload['hash']
+                    if self.sqlite_service.is_duplicate(self.collection, hash_value):
+                        duplicate_count += 1
+                    else:
+                        filtered_texts.append(text)
+                        filtered_payloads.append(payload)
+                else:
+                    # If no hash in payload, include it (shouldn't happen with proper processing)
+                    filtered_texts.append(text)
+                    filtered_payloads.append(payload)
+            
+            if duplicate_count > 0:
+                self.log(f"Skipped {duplicate_count} duplicate documents")
+            
+            if not filtered_texts:
+                self.log("No new documents to process after duplicate filtering.")
+                return
+            
+            self.log(f"Processing {len(filtered_texts)} new documents. Generating embeddings...")
 
             # Get the embedding model used for this collection
             collection_model = self.qdrant_service.get_collection_model(self.collection)
             if collection_model:
                 self.log(f"Using collection's embedding model: {collection_model}")
-                embeddings = self.openai_service.generate_embeddings(texts, model=collection_model)
+                embeddings = self.openai_service.generate_embeddings(filtered_texts, model=collection_model)
             else:
                 # Fallback to default model if collection model not found
                 self.log("Embedding model not found, using default: text-embedding-3-small")
-                embeddings = self.openai_service.generate_embeddings(texts)
+                embeddings = self.openai_service.generate_embeddings(filtered_texts)
 
             if not embeddings:
                 self.log("Failed to generate any embeddings.", True)
                 return
 
-            if len(embeddings) != len(texts):
-                self.log(f"Embedding count mismatch. Expected {len(texts)}, got {len(embeddings)}.", True)
+            if len(embeddings) != len(filtered_texts):
+                self.log(f"Embedding count mismatch. Expected {len(filtered_texts)}, got {len(embeddings)}.", True)
                 return
 
             # Check if embeddings are real (non-random) by checking if they look like random data
@@ -973,15 +1053,16 @@ class Cli:
 
             self.log(f"Generated {len(embeddings)} embeddings. Inserting into collection...")
 
-            # Insert into collection using QdrantService
+            # Insert into collection using QdrantService (no duplicate checking needed since we already filtered,
+            # and hashes are marked post-success inside the service)
             success, inserted_count, skipped_count = self.qdrant_service.insert_vectors(
-                self.collection, embeddings, payloads
+                self.collection, embeddings, filtered_payloads, sqlite_service=self.sqlite_service
             )
 
             if success:
                 self.log(f"Successfully inserted {inserted_count} items into collection '{self.collection}'")
-                if skipped_count > 0:
-                    self.log(f"Skipped {skipped_count} duplicate items")
+                if duplicate_count > 0:
+                    self.log(f"Skipped {duplicate_count} duplicate documents")
                 self.log("Source command completed successfully.")
             else:
                 self.log("Vector insertion failed.", True)

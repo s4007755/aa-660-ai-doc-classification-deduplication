@@ -155,7 +155,7 @@ class SQLiteService:
             if hasattr(self._hash_index, 'initialized'):
                 self._hash_index.initialized.discard(collection)
             
-            self.log(f"Cleared all hashes for collection '{collection}'")
+            self.log(f"Dropped SQLite hash table for collection '{collection}'")
             return True
             
         except Exception as e:

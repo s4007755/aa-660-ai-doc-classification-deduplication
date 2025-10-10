@@ -50,12 +50,27 @@ class LearnerCard(ttk.Frame):
         self.extras_vars: Dict[str, tk.Variable] = {}
         self.min_conf_entry: Optional[ttk.Entry] = None
 
+        # internal: hold a reference to the label next to the target-precision slider
+        self._tp_value_lbl: Optional[ttk.Label] = None
+
         self._create_widgets(extras, collapsed)
 
-        # wire generic change listeners
-        for v in (self.var_enabled, self.var_target_precision, self.var_use_min_conf,
-                  self.var_min_conf, self.var_max_pairs, self.var_random_state):
+        for v in (
+            self.var_enabled,
+            self.var_use_min_conf,
+            self.var_min_conf,
+            self.var_max_pairs,
+            self.var_random_state,
+        ):
             v.trace_add("write", lambda *_: self._emit_change())
+
+        self.var_target_precision.trace_add(
+            "write",
+            lambda *_: (
+                self._sync_scale_label(self._tp_value_lbl) if self._tp_value_lbl is not None else None,
+                self._emit_change()
+            )
+        )
 
     # UI
     def _create_widgets(self, extras: Dict[str, Any], collapsed: bool):
@@ -85,10 +100,15 @@ class LearnerCard(ttk.Frame):
 
         row = 0
         ttk.Label(core, text="Target precision").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        tp_lbl = ttk.Label(core, text=f"{self.var_target_precision.get():.3f}")
-        ttk.Scale(core, from_=0.90, to=0.999, variable=self.var_target_precision,
-                  command=lambda *_: self._sync_scale_label(tp_lbl)).grid(row=row, column=1, sticky="we", padx=6)
-        tp_lbl.grid(row=row, column=2, sticky="e", padx=6)
+        self._tp_value_lbl = ttk.Label(core, text=f"{self.var_target_precision.get():.3f}")
+        ttk.Scale(
+            core,
+            from_=0.90,
+            to=0.999,
+            variable=self.var_target_precision,
+            command=lambda *_: self._sync_scale_label(self._tp_value_lbl),
+        ).grid(row=row, column=1, sticky="we", padx=6)
+        self._tp_value_lbl.grid(row=row, column=2, sticky="e", padx=6)
 
         # Min confidence row
         if self._show_min_conf:
@@ -96,15 +116,20 @@ class LearnerCard(ttk.Frame):
             ttk.Label(core, text="Min confidence").grid(row=row, column=0, sticky="w", padx=6, pady=4)
             use_mc = ttk.Checkbutton(core, variable=self.var_use_min_conf, command=self._toggle_min_conf)
             use_mc.grid(row=row, column=1, sticky="w", padx=(6, 2))
-            self.min_conf_entry = ttk.Entry(core, width=8, textvariable=self.var_min_conf,
-                                            state=("normal" if self.var_use_min_conf.get() else "disabled"))
+            self.min_conf_entry = ttk.Entry(
+                core,
+                width=8,
+                textvariable=self.var_min_conf,
+                state=("normal" if self.var_use_min_conf.get() else "disabled"),
+            )
             self.min_conf_entry.grid(row=row, column=2, sticky="e", padx=6)
 
         # Max pairs / Random state
         row += 1
         ttk.Label(core, text="Max pairs/epoch").grid(row=row, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(core, from_=1, to=10_000_000, increment=100, width=12,
-                    textvariable=self.var_max_pairs).grid(row=row, column=1, sticky="w", padx=6)
+        ttk.Spinbox(core, from_=1, to=10_000_000, increment=100, width=12, textvariable=self.var_max_pairs).grid(
+            row=row, column=1, sticky="w", padx=6
+        )
         ttk.Label(core, text="Random state").grid(row=row, column=2, sticky="e", padx=6)
         ttk.Entry(core, width=8, textvariable=self.var_random_state).grid(row=row, column=3, sticky="e", padx=6)
 
@@ -115,8 +140,11 @@ class LearnerCard(ttk.Frame):
         adv_frame = ttk.Frame(self)
         adv_header = ttk.Frame(adv_frame)
         adv_header.pack(fill=tk.X)
-        self._adv_btn = ttk.Button(adv_header, text=("Show advanced ▸" if collapsed else "Hide advanced ▾"),
-                                   command=self._toggle_advanced)
+        self._adv_btn = ttk.Button(
+            adv_header,
+            text=("Show advanced ▸" if collapsed else "Hide advanced ▾"),
+            command=self._toggle_advanced,
+        )
         self._adv_btn.pack(side=tk.LEFT)
         self._adv_body = ttk.LabelFrame(adv_frame, text="Advanced")
         if not collapsed:
@@ -151,7 +179,7 @@ class LearnerCard(ttk.Frame):
         elif k == "embedding":
             v1 = self._mk_str_var(extras.get("model_name", "sentence-transformers/all-MiniLM-L6-v2")); add_row(r, "Model name", v1, ttk.Entry(parent, textvariable=v1)); r += 1
             v2 = self._mk_int_var(extras.get("batch_size", 64)); add_row(r, "Batch size", v2, ttk.Spinbox(parent, from_=1, to=2048, textvariable=v2, width=8)); r += 1
-            v3 = self._mk_float_var(extras.get("cosine_threshold", 0.92)); add_row(r, "Cosine threshold", v3, ttk.Entry(parent, textvariable=v3, width=8)); r += 1
+            v3 = self._mk_float_var(extras.get("cosine_threshold", 0.985)); add_row(r, "Cosine threshold", v3, ttk.Entry(parent, textvariable=v3, width=8)); r += 1
             v4 = self._mk_bool_var(extras.get("whiten", False)); add_row(r, "Whiten", v4, ttk.Checkbutton(parent, variable=v4)); r += 1
             v5 = self._mk_bool_var(extras.get("remove_top_pc", False)); add_row(r, "Remove top PC", v5, ttk.Checkbutton(parent, variable=v5)); r += 1
             v6 = self._mk_bool_var(extras.get("normalize_strict", False)); add_row(r, "Normalize strict", v6, ttk.Checkbutton(parent, variable=v6)); r += 1
@@ -174,7 +202,7 @@ class LearnerCard(ttk.Frame):
             except Exception:
                 return "—"
 
-        # est. precision
+        # est precision
         if est_precision is None and target_precision is None:
             prec_txt = "est. precision: —"
         elif est_precision is None:
@@ -234,6 +262,11 @@ class LearnerCard(ttk.Frame):
         self.var_random_state.set(int(cfg.random_state))
         self._set_extras(cfg.extras or {})
         self._toggle_min_conf()
+
+        # ensure the numeric label next to the slider reflects the new value
+        if self._tp_value_lbl is not None:
+            self._sync_scale_label(self._tp_value_lbl)
+
         self._emit_change()
 
     # internals
@@ -250,7 +283,9 @@ class LearnerCard(ttk.Frame):
         if self.min_conf_entry is not None:
             self.min_conf_entry.configure(state=state)
 
-    def _sync_scale_label(self, lbl: ttk.Label):
+    def _sync_scale_label(self, lbl: Optional[ttk.Label]):
+        if lbl is None:
+            return
         lbl.configure(text=f"{self.var_target_precision.get():.3f}")
 
     def _emit_change(self):
@@ -287,7 +322,6 @@ class LearnerCard(ttk.Frame):
 
     def _set_extras(self, extras: Dict[str, Any]):
         keys = self._known_extra_keys()
-        # re-key once so callers can pass dicts with natural keys
         if len(self.extras_vars) == len(keys):
             for (k, var), name in zip(list(self.extras_vars.items()), keys):
                 self.extras_vars[name] = self.extras_vars.pop(k)

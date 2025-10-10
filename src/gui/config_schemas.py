@@ -56,7 +56,7 @@ def make_profile(name: str) -> PipelineConfig:
         return PipelineConfig(
             simhash=LearnerConfig(enabled=True, target_precision=0.98),
             minhash=LearnerConfig(enabled=True, target_precision=0.98),
-            embedding=LearnerConfig(enabled=True, target_precision=0.98),
+            embedding=LearnerConfig(enabled=True, target_precision=0.98, extras={"cosine_threshold": 0.985}),
             arbiter=ArbiterConfig(require_agreement=2, gray_zone_margin=0.05, max_self_train_epochs=2),
             candidates=CandidateConfig(use_lsh=True, shingle_size=3, num_perm=64, lsh_threshold=0.6),
             bootstrap=BootstrapConfig(max_pos_pairs=50_000, max_neg_pairs=50_000),
@@ -67,7 +67,7 @@ def make_profile(name: str) -> PipelineConfig:
         return PipelineConfig(
             simhash=LearnerConfig(enabled=True, target_precision=0.995, min_confidence=0.60),
             minhash=LearnerConfig(enabled=True, target_precision=0.995, min_confidence=0.60),
-            embedding=LearnerConfig(enabled=True, target_precision=0.995, min_confidence=0.60),
+            embedding=LearnerConfig(enabled=True, target_precision=0.995, min_confidence=0.60, extras={"cosine_threshold": 0.99}),
             arbiter=ArbiterConfig(require_agreement=2, gray_zone_margin=0.04, max_self_train_epochs=2),
             candidates=CandidateConfig(use_lsh=True, shingle_size=3, num_perm=64, lsh_threshold=0.65),
             bootstrap=BootstrapConfig(max_pos_pairs=60_000, max_neg_pairs=80_000),
@@ -78,7 +78,7 @@ def make_profile(name: str) -> PipelineConfig:
         return PipelineConfig(
             simhash=LearnerConfig(enabled=True, target_precision=0.95),
             minhash=LearnerConfig(enabled=True, target_precision=0.95),
-            embedding=LearnerConfig(enabled=True, target_precision=0.95),
+            embedding=LearnerConfig(enabled=True, target_precision=0.95, extras={"cosine_threshold": 0.98}),
             arbiter=ArbiterConfig(require_agreement=2, gray_zone_margin=0.08, max_self_train_epochs=3),
             candidates=CandidateConfig(use_lsh=True, shingle_size=2, num_perm=64, lsh_threshold=0.5, max_candidates_per_doc=4000),
             bootstrap=BootstrapConfig(max_pos_pairs=70_000, max_neg_pairs=70_000),

@@ -1,4 +1,3 @@
-# src/learners/embed_model.py
 from __future__ import annotations
 
 import re
@@ -25,61 +24,27 @@ from src.learners.base import (
     make_fresh_state,
 )
 
+# Unified calibration utils
+from src.training.calibration import (
+    calibrate_adaptive_and_select_threshold,
+    apply_binning_or_platt,
+)
+
+# Helpers
+
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 def _cos_to_unit(x: float) -> float:
+    # map cosine [-1, 1] -> [0, 1]
     return float((x + 1.0) * 0.5)
-
-def _fit_binned_calibration(scores: np.ndarray, labels: np.ndarray, n_bins: int = 20):
-    if scores.size == 0:
-        edges = np.linspace(0.0, 1.0, n_bins + 1, dtype=np.float32)
-        probs = np.linspace(0.0, 1.0, n_bins, dtype=np.float32)
-        return edges, probs
-    edges = np.linspace(0.0, 1.0, n_bins + 1, dtype=np.float32)
-    idx = np.clip(np.searchsorted(edges, scores, side="right") - 1, 0, n_bins - 1)
-    bin_pos = np.bincount(idx, weights=labels, minlength=n_bins).astype(np.float64)
-    bin_cnt = np.bincount(idx, minlength=n_bins).astype(np.float64)
-    probs = (bin_pos + 1.0) / (bin_cnt + 2.0)
-    for i in range(1, n_bins):
-        if probs[i] < probs[i - 1]:
-            probs[i] = probs[i - 1]
-    return edges, probs.astype(np.float32)
-
-def _calibrated_prob(score: float, edges: np.ndarray, probs: np.ndarray) -> float:
-    if not (0.0 <= score <= 1.0) or edges.size == 0:
-        return max(0.0, min(1.0, score))
-    n_bins = probs.shape[0]
-    i = int(np.clip(np.searchsorted(edges, score, side="right") - 1, 0, n_bins - 1))
-    left = edges[i]; right = edges[i + 1]
-    p = probs[i]
-    if right > left:
-        t = (score - left) / (right - left)
-        p_next = probs[min(i + 1, n_bins - 1)]
-        return float((1 - t) * p + t * p_next)
-    return float(p)
-
-def _choose_threshold(scores: np.ndarray, labels: np.ndarray, edges: np.ndarray, probs: np.ndarray, target_precision: float) -> float:
-    if scores.size == 0:
-        return 0.5
-    cand = np.linspace(0.0, 1.0, 201, dtype=np.float32)
-    cal = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
-    best = 1.0
-    for th in cand:
-        preds = (cal >= th)
-        tp = float(np.sum((preds == 1) & (labels == 1)))
-        fp = float(np.sum((preds == 1) & (labels == 0)))
-        if tp + fp == 0:
-            continue
-        prec = tp / (tp + fp)
-        if prec >= target_precision:
-            best = min(best, float(th))
-    return float(best)
 
 def _cheap_embed(texts: List[str], dim: int = 384) -> np.ndarray:
     if not texts:
         return np.zeros((0, dim), dtype=np.float32)
     vecs = np.zeros((len(texts), dim), dtype=np.float32)
     for i, t in enumerate(texts):
+        if not t:
+            continue
         h = 0
         for j, ch in enumerate(t):
             h = (h * 1315423911 + ord(ch) + j) & 0xFFFFFFFFFFFFFFFF
@@ -90,12 +55,18 @@ def _cheap_embed(texts: List[str], dim: int = 384) -> np.ndarray:
             vecs[i] /= n
     return vecs
 
+# Internal state
+
 @dataclass
 class _State:
     edges: Optional[np.ndarray] = None
     probs: Optional[np.ndarray] = None
     mean: Optional[np.ndarray] = None
     top_pc: Optional[np.ndarray] = None
+    platt_a: Optional[float] = None
+    platt_b: Optional[float] = None
+
+# Learner
 
 class EmbeddingLearner(ILearner):
     @property
@@ -109,6 +80,8 @@ class EmbeddingLearner(ILearner):
         self._model: Optional[Any] = None
         self._using_fallback = False
 
+    # config/state
+
     @property
     def config(self) -> LearnerConfig:
         return self._config
@@ -119,10 +92,15 @@ class EmbeddingLearner(ILearner):
     def load_state(self, state: Optional[LearnerState]) -> None:
         self._state = state or make_fresh_state("embedding fresh")
         lp = self._state.learned_params or {}
+
         edges_arr = np.array(lp.get("bin_edges", []), dtype=np.float32)
         probs_arr = np.array(lp.get("bin_probs", []), dtype=np.float32)
         self._istate.edges = edges_arr if edges_arr.size else None
         self._istate.probs = probs_arr if probs_arr.size else None
+
+        self._istate.platt_a = lp.get("platt_a")
+        self._istate.platt_b = lp.get("platt_b")
+
         mean = np.array(lp.get("domain_mean", []), dtype=np.float32)
         self._istate.mean = mean if mean.size else None
         top_pc = np.array(lp.get("domain_top_pc", []), dtype=np.float32)
@@ -136,7 +114,6 @@ class EmbeddingLearner(ILearner):
             return
         model_name = str(self._config.extras.get("model_name", "fallback")).strip().lower()
 
-        # Force cheap local embedding if user chose
         if model_name in ("fallback", "none", "off"):
             self._model = None
             self._using_fallback = True
@@ -146,24 +123,47 @@ class EmbeddingLearner(ILearner):
             if SentenceTransformer is None:
                 raise RuntimeError("sentence-transformers not available")
             self._model = SentenceTransformer(model_name)
-            _ = int(self._config.extras.get("batch_size", 64))  # validate
+            _ = int(self._config.extras.get("batch_size", 64))
         except Exception:
             self._model = None
             self._using_fallback = True
 
+    # scoring
+
     def score_pair(self, a: DocumentView, b: DocumentView) -> LearnerOutput:
-        e1 = self._embed_texts([a.text])[0]
-        e2 = self._embed_texts([b.text])[0]
+        t1 = a.text or ""
+        t2 = b.text or ""
+
+        e1 = self._embed_texts([t1])[0]
+        e2 = self._embed_texts([t2])[0]
         e1 = self._apply_whiten(e1)
         e2 = self._apply_whiten(e2)
-        cos = float(np.dot(e1, e2))
+
+        n1 = float(np.linalg.norm(e1))
+        n2 = float(np.linalg.norm(e2))
+
+        if n1 == 0.0 and n2 == 0.0:
+            cos = 0.0
+        else:
+            cos = float(np.dot(e1, e2))
+
         score = _cos_to_unit(cos)
 
-        edges, probs = self._istate.edges, self._istate.probs
-        prob = score if edges is None or probs is None else _calibrated_prob(score, edges, probs)
+        prob = apply_binning_or_platt(
+            score,
+            self._state.calibration,
+            self._istate.edges,
+            self._istate.probs,
+        )
         th = self._state.calibration.threshold
 
         top_pairs = self._top_sentence_pairs(a, b, top_k=int(self._config.extras.get("topk_sentences", 3)))
+        warnings: List[str] = []
+        if (not t1.strip()) and (not t2.strip()):
+            warnings.append("Both texts are empty after basic extraction.")
+        elif n1 == 0.0 and n2 == 0.0:
+            warnings.append("Both embeddings are zero after preprocessing/whitening (no evidence).")
+
         rationale = {
             "cosine": float(cos),
             "top_matching_sentences": top_pairs,
@@ -178,10 +178,10 @@ class EmbeddingLearner(ILearner):
         }
         return LearnerOutput(
             raw_score=float(score),
-            prob=float(prob),
+            prob=float(min(prob, 1.0 - 1e-9)),
             threshold=th,
             rationale=rationale,
-            warnings=[],
+            warnings=warnings,
             internals=None,
         )
 
@@ -191,27 +191,36 @@ class EmbeddingLearner(ILearner):
             return []
         unique: Dict[str, str] = {}
         for a, b in pairs_list:
-            unique.setdefault(a.doc_id, a.text)
-            unique.setdefault(b.doc_id, b.text)
+            unique.setdefault(a.doc_id, a.text or "")
+            unique.setdefault(b.doc_id, b.text or "")
         ids = list(unique.keys())
         texts = [unique[i] for i in ids]
         embs = self._embed_texts(texts)
         embs = np.vstack([self._apply_whiten(e) for e in embs])
         emb_map = {ids[i]: embs[i] for i in range(len(ids))}
 
-        edges, probs = self._istate.edges, self._istate.probs
         th = self._state.calibration.threshold
-
         outs: List[LearnerOutput] = []
         for a, b in pairs_list:
             e1 = emb_map[a.doc_id]
             e2 = emb_map[b.doc_id]
-            cos = float(np.dot(e1, e2))
+            n1 = float(np.linalg.norm(e1))
+            n2 = float(np.linalg.norm(e2))
+            if n1 == 0.0 and n2 == 0.0:
+                cos = 0.0
+            else:
+                cos = float(np.dot(e1, e2))
             score = _cos_to_unit(cos)
-            prob = score if edges is None or probs is None else _calibrated_prob(score, edges, probs)
-            rationale = {"cosine": float(cos), "threshold_used": None if th is None else float(th), "model_fallback": bool(self._using_fallback)}
-            outs.append(LearnerOutput(raw_score=float(score), prob=float(prob), threshold=th, rationale=rationale))
+            prob = apply_binning_or_platt(score, self._state.calibration, self._istate.edges, self._istate.probs)
+            outs.append(LearnerOutput(
+                raw_score=float(score),
+                prob=float(min(prob, 1.0 - 1e-9)),
+                threshold=th,
+                rationale={"cosine": float(cos), "threshold_used": None if th is None else float(th), "model_fallback": bool(self._using_fallback)},
+            ))
         return outs
+
+    # training
 
     def fit_calibration(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> LearnerState:
         pos_pairs = list(positives)
@@ -229,13 +238,19 @@ class EmbeddingLearner(ILearner):
             uniq.setdefault(b.doc_id, b)
 
         ids = list(uniq.keys())
-        texts = [uniq[i].text for i in ids]
+        texts = [uniq[i].text or "" for i in ids]
         embs = self._embed_texts(texts)
         embs = np.vstack([self._apply_whiten(e) for e in embs])
         emb_map = {ids[i]: embs[i] for i in range(len(ids))}
 
         def _pair_score(a: DocumentView, b: DocumentView) -> float:
-            return _cos_to_unit(float(np.dot(emb_map[a.doc_id], emb_map[b.doc_id])))
+            v1 = emb_map[a.doc_id]; v2 = emb_map[b.doc_id]
+            n1 = float(np.linalg.norm(v1)); n2 = float(np.linalg.norm(v2))
+            if n1 == 0.0 and n2 == 0.0:
+                c = 0.0
+            else:
+                c = float(np.dot(v1, v2))
+            return _cos_to_unit(c)
 
         # 2) Compute scores using cached embeddings
         pos_scores = np.array([_pair_score(a, b) for a, b in pos_pairs], dtype=np.float32)
@@ -243,24 +258,25 @@ class EmbeddingLearner(ILearner):
         scores = np.concatenate([pos_scores, neg_scores], axis=0)
         labels = np.concatenate([np.ones_like(pos_scores), np.zeros_like(neg_scores)], axis=0)
 
-        # 3) Calibrate + pick threshold
-        edges, probs = _fit_binned_calibration(scores, labels, n_bins=int(self._config.extras.get("n_bins", 20)))
-        th = _choose_threshold(scores, labels, edges, probs, target_precision=float(self._config.target_precision))
-        cal_probs = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
-        brier = float(np.mean((cal_probs - labels) ** 2))
-
-        self._istate.edges = edges
-        self._istate.probs = probs
-        self._state.calibration = CalibrationParams(
-            method="isotonic",
-            params={},
-            threshold=float(th),
-            brier_score=brier,
-            reliability_bins=self._reliability_bins(scores, labels, edges, probs),
+        # 3) Smart calibration + pick threshold
+        cal, platt_params, edges, probs = calibrate_adaptive_and_select_threshold(
+            scores, labels,
+            target_precision=float(self._config.target_precision),
+            n_bins=int(self._config.extras.get("n_bins", 20)),
         )
+
+        # Store
+        self._state.calibration = cal
+        self._istate.edges = edges if edges.size else None
+        self._istate.probs = probs if probs.size else None
+        self._istate.platt_a = platt_params.get("a")
+        self._istate.platt_b = platt_params.get("b")
+
         self._state.learned_params = {
-            "bin_edges": edges.tolist(),
-            "bin_probs": probs.tolist(),
+            "bin_edges": [] if self._istate.edges is None else self._istate.edges.tolist(),
+            "bin_probs": [] if self._istate.probs is None else self._istate.probs.tolist(),
+            "platt_a": self._istate.platt_a,
+            "platt_b": self._istate.platt_b,
             "domain_mean": None if self._istate.mean is None else self._istate.mean.tolist(),
             "domain_top_pc": None if self._istate.top_pc is None else self._istate.top_pc.tolist(),
             "model_name": str(self._config.extras.get("model_name", "fallback")),
@@ -268,14 +284,16 @@ class EmbeddingLearner(ILearner):
         }
         return self._state
 
-
     def self_train(self, pseudo_labels: Iterable[PairLabel]) -> LearnerState:
         return self._state
 
+    # internals
+
     def _raw_score(self, a: DocumentView, b: DocumentView) -> float:
-        e1 = self._apply_whiten(self._embed_texts([a.text])[0])
-        e2 = self._apply_whiten(self._embed_texts([b.text])[0])
-        cos = float(np.dot(e1, e2))
+        v1 = self._apply_whiten(self._embed_texts([a.text or ""])[0])
+        v2 = self._apply_whiten(self._embed_texts([b.text or ""])[0])
+        n1 = float(np.linalg.norm(v1)); n2 = float(np.linalg.norm(v2))
+        cos = 0.0 if (n1 == 0.0 and n2 == 0.0) else float(np.dot(v1, v2))
         return _cos_to_unit(cos)
 
     def _embed_texts(self, texts: List[str]) -> np.ndarray:
@@ -345,7 +363,7 @@ class EmbeddingLearner(ILearner):
     def _reliability_bins(self, scores: np.ndarray, labels: np.ndarray, edges: np.ndarray, probs: np.ndarray, n_bins: int = 10):
         centers = np.linspace(0.05, 0.95, n_bins, dtype=np.float32)
         rows: List[Dict[str, Any]] = []
-        cal = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
+        cal = np.array([apply_binning_or_platt(s, self._state.calibration, edges, probs) for s in scores], dtype=np.float32)
         for c in centers:
             mask = (cal >= (c - 0.05)) & (cal < (c + 0.05))
             if not np.any(mask):

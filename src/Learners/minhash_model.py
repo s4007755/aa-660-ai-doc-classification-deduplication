@@ -1,4 +1,3 @@
-# src/learners/minhash_model.py
 from __future__ import annotations
 
 import re
@@ -26,13 +25,19 @@ from src.learners.base import (
     make_fresh_state,
 )
 
-# Small stopword seed
+# Unified calibration utilities
+from src.training.calibration import (
+    calibrate_adaptive_and_select_threshold,
+    apply_binning_or_platt,
+)
+
+# Tokenization / Jaccard utils
+
 _DEFAULT_SW = {
     "the","a","an","and","or","for","of","to","in","on","at","by","with","from","as",
     "is","are","was","were","be","been","it","this","that","these","those","you","your",
 }
 
-# Tokenize words
 def _tokenize_words(s: str, *, strict: bool, min_len: int, stopwords: set[str], remove_stopwords: bool) -> List[str]:
     if not s:
         return []
@@ -49,7 +54,6 @@ def _tokenize_words(s: str, *, strict: bool, min_len: int, stopwords: set[str], 
         out.append(t)
     return out
 
-# Word n-gram shingles
 def _word_shingles(tokens: List[str], k: int) -> List[str]:
     if k <= 1:
         return tokens[:]
@@ -57,16 +61,14 @@ def _word_shingles(tokens: List[str], k: int) -> List[str]:
         return []
     return [" ".join(tokens[i : i + k]) for i in range(len(tokens) - k + 1)]
 
-# Char n-gram shingles
 def _char_shingles(s: str, k: int) -> List[str]:
     if not s or k <= 0 or len(s) < k:
         return []
     return [s[i : i + k] for i in range(len(s) - k + 1)]
 
-# Exact Jaccard on two shingle lists
 def _jaccard_from_sets(a: List[str], b: List[str]) -> float:
     if not a and not b:
-        return 1.0
+        return 0.0
     sa, sb = set(a), set(b)
     inter = len(sa & sb)
     union = len(sa | sb)
@@ -74,84 +76,40 @@ def _jaccard_from_sets(a: List[str], b: List[str]) -> float:
         return 0.0
     return float(inter) / float(union)
 
-# Simple binned calibration
-def _fit_binned_calibration(scores: np.ndarray, labels: np.ndarray, n_bins: int = 20):
-    if scores.size == 0:
-        edges = np.linspace(0.0, 1.0, n_bins + 1, dtype=np.float32)
-        probs = np.linspace(0.0, 1.0, n_bins, dtype=np.float32)
-        return edges, probs
-    edges = np.linspace(0.0, 1.0, n_bins + 1, dtype=np.float32)
-    idx = np.clip(np.searchsorted(edges, scores, side="right") - 1, 0, n_bins - 1)
-    bin_pos = np.bincount(idx, weights=labels, minlength=n_bins).astype(np.float64)
-    bin_cnt = np.bincount(idx, minlength=n_bins).astype(np.float64)
-    probs = (bin_pos + 1.0) / (bin_cnt + 2.0)  # Laplace smoothing
-    for i in range(1, n_bins):
-        if probs[i] < probs[i - 1]:
-            probs[i] = probs[i - 1]
-    return edges, probs.astype(np.float32)
-
-# Apply binned calibration
-def _calibrated_prob(score: float, edges: np.ndarray, probs: np.ndarray) -> float:
-    if not (0.0 <= score <= 1.0) or edges.size == 0:
-        return max(0.0, min(1.0, score))
-    n_bins = probs.shape[0]
-    i = int(np.clip(np.searchsorted(edges, score, side="right") - 1, 0, n_bins - 1))
-    left = edges[i]; right = edges[i + 1]
-    p = probs[i]
-    if right > left:
-        t = (score - left) / (right - left)
-        p_next = probs[min(i + 1, n_bins - 1)]
-        return float((1 - t) * p + t * p_next)
-    return float(p)
-
-# Threshold by target precision
-def _choose_threshold(scores: np.ndarray, labels: np.ndarray, edges: np.ndarray, probs: np.ndarray, target_precision: float) -> float:
-    if scores.size == 0:
-        return 0.5
-    cand = np.linspace(0.0, 1.0, 201, dtype=np.float32)
-    best = 1.0
-    cal = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
-    for th in cand:
-        preds = (cal >= th)
-        tp = float(np.sum((preds == 1) & (labels == 1)))
-        fp = float(np.sum((preds == 1) & (labels == 0)))
-        if tp + fp == 0:
-            continue
-        prec = tp / (tp + fp)
-        if prec >= target_precision:
-            best = min(best, float(th))
-    return float(best)
+# Internal state
 
 @dataclass
 class _State:
     edges: Optional[np.ndarray] = None
     probs: Optional[np.ndarray] = None
+    platt_a: Optional[float] = None
+    platt_b: Optional[float] = None
+
+# Learner
 
 class MinHashLearner(ILearner):
     @property
     def name(self) -> str:
         return "minhash"
 
-    # Init with default config and fresh state
     def __init__(self, config: Optional[LearnerConfig] = None):
         self._config: LearnerConfig = config or LearnerConfig()
         self._state: LearnerState = make_fresh_state("minhash init")
-        self._istate = _State(edges=None, probs=None)
+        self._istate = _State(edges=None, probs=None, platt_a=None, platt_b=None)
         self._stopwords = set(_DEFAULT_SW)
 
-    # Active configuration
+    # config/state
+
     @property
     def config(self) -> LearnerConfig:
         return self._config
 
-    # Apply configuration and propagate extras
     def configure(self, config: LearnerConfig) -> None:
         self._config = config
         extras = config.extras or {}
         sw_extra = set(map(str.lower, extras.get("stopwords", [])))
         self._stopwords = set(_DEFAULT_SW) | sw_extra
 
-    # Load persisted learner state
     def load_state(self, state: Optional[LearnerState]) -> None:
         self._state = state or make_fresh_state("minhash fresh")
         lp = self._state.learned_params or {}
@@ -159,20 +117,25 @@ class MinHashLearner(ILearner):
         probs = np.array(lp.get("bin_probs", []), dtype=np.float32)
         self._istate.edges = edges if edges.size else None
         self._istate.probs = probs if probs.size else None
+        self._istate.platt_a = lp.get("platt_a")
+        self._istate.platt_b = lp.get("platt_b")
 
-    # Return a snapshot of current state
     def get_state(self) -> LearnerState:
         return self._state
 
     def prepare(self, corpus_stats: Optional[CorpusStats] = None) -> None:
         pass
 
-    # Score a pair and return calibrated probability and rationale
+    # scoring
+
     def score_pair(self, a: DocumentView, b: DocumentView) -> LearnerOutput:
         jaccard, sample_shared, overlap_count, universe_size = self._score_and_sample(a, b)
-        edges, probs = self._istate.edges, self._istate.probs
-        prob = float(jaccard) if edges is None or probs is None else _calibrated_prob(jaccard, edges, probs)
+        prob = apply_binning_or_platt(jaccard, self._state.calibration, self._istate.edges, self._istate.probs)
         th = self._state.calibration.threshold
+
+        warns: List[str] = []
+        if universe_size == 0:
+            warns.append("Both sides produced no shingles after preprocessing")
 
         rationale = {
             "jaccard": float(jaccard),
@@ -185,17 +148,16 @@ class MinHashLearner(ILearner):
         }
         return LearnerOutput(
             raw_score=float(jaccard),
-            prob=float(prob),
+            prob=float(min(prob, 1.0 - 1e-9)),
             threshold=th,
             rationale=rationale,
-            warnings=[],
+            warnings=warns,
             internals=None,
         )
 
-    # Batch scoring with caches
     def batch_score(self, pairs: Iterable[Pair]) -> List[LearnerOutput]:
-        edges, probs = self._istate.edges, self._istate.probs
         th = self._state.calibration.threshold
+        edges, probs = self._istate.edges, self._istate.probs
 
         cache_shingles: Dict[str, List[str]] = {}
         cache_minhash: Dict[str, Any] = {}
@@ -206,22 +168,22 @@ class MinHashLearner(ILearner):
         outs: List[LearnerOutput] = []
         for a, b in pairs:
             if use_minhash:
-                ja = self._jaccard_minhash(a, b, cache_shingles, cache_minhash, num_perm)
-                jaccard = ja
+                jaccard = self._jaccard_minhash(a, b, cache_shingles, cache_minhash, num_perm)
             else:
                 sh_a = self._get_shingles_cached(a, cache_shingles)
                 sh_b = self._get_shingles_cached(b, cache_shingles)
                 jaccard = _jaccard_from_sets(sh_a, sh_b)
 
-            prob = float(jaccard) if edges is None or probs is None else _calibrated_prob(jaccard, edges, probs)
-            rationale = {
-                "jaccard": float(jaccard),
-                "threshold_used": None if th is None else float(th),
-            }
-            outs.append(LearnerOutput(raw_score=float(jaccard), prob=float(prob), threshold=th, rationale=rationale))
+            prob = apply_binning_or_platt(jaccard, self._state.calibration, edges, probs)
+            warns = []
+            if not self._get_shingles_cached(a, cache_shingles) and not self._get_shingles_cached(b, cache_shingles):
+                warns.append("Both sides produced no shingles after preprocessing")
+            rationale = {"jaccard": float(jaccard), "threshold_used": None if th is None else float(th)}
+            outs.append(LearnerOutput(raw_score=float(jaccard), prob=float(min(prob, 1.0 - 1e-9)), threshold=th, rationale=rationale, warnings=warns))
         return outs
 
-    # Fit calibration on bootstrap and choose threshold for target precision
+    # training
+
     def fit_calibration(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> LearnerState:
         pos_pairs = list(positives)
         neg_pairs = list(negatives)
@@ -233,24 +195,23 @@ class MinHashLearner(ILearner):
         scores = np.concatenate([pos_scores, neg_scores], axis=0)
         labels = np.concatenate([np.ones_like(pos_scores), np.zeros_like(neg_scores)], axis=0)
 
-        edges, probs = _fit_binned_calibration(scores, labels, n_bins=int(self._config.extras.get("n_bins", 20)))
-        th = _choose_threshold(scores, labels, edges, probs, target_precision=float(self._config.target_precision))
-
-        cal_probs = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
-        brier = float(np.mean((cal_probs - labels) ** 2))
-
-        self._istate.edges = edges
-        self._istate.probs = probs
-        self._state.calibration = CalibrationParams(
-            method="isotonic",
-            params={},
-            threshold=float(th),
-            brier_score=brier,
-            reliability_bins=self._reliability_bins(scores, labels, edges, probs),
+        cal, platt_params, edges, probs = calibrate_adaptive_and_select_threshold(
+            scores, labels,
+            target_precision=float(self._config.target_precision),
+            n_bins=int(self._config.extras.get("n_bins", 20)),
         )
+
+        self._state.calibration = cal
+        self._istate.edges = edges if edges.size else None
+        self._istate.probs = probs if probs.size else None
+        self._istate.platt_a = platt_params.get("a")
+        self._istate.platt_b = platt_params.get("b")
+
         self._state.learned_params = {
-            "bin_edges": edges.tolist(),
-            "bin_probs": probs.tolist(),
+            "bin_edges": [] if self._istate.edges is None else self._istate.edges.tolist(),
+            "bin_probs": [] if self._istate.probs is None else self._istate.probs.tolist(),
+            "platt_a": self._istate.platt_a,
+            "platt_b": self._istate.platt_b,
             "shingle_size": int(self._get_shingle_size()),
             "tokenizer_mode": str(self._get_tokenizer_mode()),
             "use_minhash": bool(self._config.extras.get("use_minhash", True) and MinHash is not None),
@@ -281,13 +242,11 @@ class MinHashLearner(ILearner):
     def _strip_dates_ids(self) -> bool:
         return bool(self._config.extras.get("strip_dates_ids", False))
 
-    # Compute raw Jaccard on shingles
     def _raw_score(self, a: DocumentView, b: DocumentView) -> float:
         sh_a = self._get_shingles(a)
         sh_b = self._get_shingles(b)
         return _jaccard_from_sets(sh_a, sh_b)
 
-    # Score and pick a few shared shingles for rationale
     def _score_and_sample(self, a: DocumentView, b: DocumentView) -> Tuple[float, List[str], int, int]:
         sh_a = self._get_shingles(a)
         sh_b = self._get_shingles(b)
@@ -298,7 +257,6 @@ class MinHashLearner(ILearner):
         sample_shared = [t for t, _ in Counter(list(inter)).most_common(5)]
         return j, sample_shared, len(inter), len(union)
 
-    # Get shingles with caching dict
     def _get_shingles_cached(self, d: DocumentView, cache: Dict[str, List[str]]) -> List[str]:
         if d.doc_id in cache:
             return cache[d.doc_id]
@@ -306,7 +264,6 @@ class MinHashLearner(ILearner):
         cache[d.doc_id] = sh
         return sh
 
-    # Build shingles from document view based on mode/size
     def _get_shingles(self, d: DocumentView) -> List[str]:
         mode = self._get_tokenizer_mode()
         k = self._get_shingle_size()
@@ -315,7 +272,7 @@ class MinHashLearner(ILearner):
         remove_sw = self._remove_stopwords()
 
         if mode == "char":
-            s = d.text.lower() if d.text else ""
+            s = (d.text or "").lower()
             if strict:
                 s = re.sub(r"\s+", " ", s)
                 s = re.sub(r"[^\w\s]", " ", s)
@@ -331,7 +288,6 @@ class MinHashLearner(ILearner):
             toks = [t for t in toks if not re.fullmatch(r"\d{6,}", t) and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)]
         return _word_shingles(toks, k)
 
-    # MinHash-based Jaccard estimate using datasketch
     def _jaccard_minhash(
         self,
         a: DocumentView,
@@ -363,17 +319,3 @@ class MinHashLearner(ILearner):
             sh_a = self._get_shingles_cached(a, cache_shingles)
             sh_b = self._get_shingles_cached(b, cache_shingles)
             return _jaccard_from_sets(sh_a, sh_b)
-
-    # Build a coarse reliability table for GUI/report
-    def _reliability_bins(self, scores: np.ndarray, labels: np.ndarray, edges: np.ndarray, probs: np.ndarray, n_bins: int = 10):
-        centers = np.linspace(0.05, 0.95, n_bins, dtype=np.float32)
-        rows: List[Dict[str, Any]] = []
-        cal = np.array([_calibrated_prob(s, edges, probs) for s in scores], dtype=np.float32)
-        for c in centers:
-            mask = (cal >= (c - 0.05)) & (cal < (c + 0.05))
-            if not np.any(mask):
-                rows.append({"prob_center": float(c), "expected_pos_rate": float(c), "observed_pos_rate": 0.0, "count": 0})
-                continue
-            obs = float(np.mean(labels[mask]))
-            rows.append({"prob_center": float(c), "expected_pos_rate": float(c), "observed_pos_rate": obs, "count": int(np.sum(mask))})
-        return rows

@@ -56,7 +56,7 @@ Built for day to day cleanup of messy document sets. Unsupervised by default, wi
 - PowerShell (Windows):
 
 python -m venv .venv
-venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 
 - macOS/Linux:
 

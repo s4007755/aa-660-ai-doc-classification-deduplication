@@ -23,12 +23,12 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 # quick header/footer/page-number patterns
 _RE_PAGE_NUM = re.compile(r"\bpage\s+\d+(\s+of\s+\d+)?\b", re.IGNORECASE)
 _RE_HR = re.compile(r"\n-{2,}\n")
-_RE_SOFT_HYPHEN = re.compile(r"-\n")  # de-hyphenation across line breaks
+_RE_SOFT_HYPHEN = re.compile(r"-\n")
 _RE_MULTI_SPACE = re.compile(r"\s+")
 
 # digits/IDs/dates for strict cleanup
-_RE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")         # YYYY-MM-DD
-_RE_LONG_ID = re.compile(r"\b\d{6,}\b")                 # long numeric IDs
+_RE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_RE_LONG_ID = re.compile(r"\b\d{6,}\b")
 
 # export surface
 __all__ = [
@@ -70,7 +70,7 @@ def normalize_text(
     t = _RE_MULTI_SPACE.sub(" ", t).strip().lower()
     return t
 
-# simple word tokenizer with optional stopword removal and min token length
+# simple word tokenizer
 def tokenize_words(
     text: str,
     *,

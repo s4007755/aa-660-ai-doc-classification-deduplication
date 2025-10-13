@@ -1,286 +1,287 @@
 # src/gui/widgets/metrics_panel.py
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk
+
+_HAVE_MPL = False
+try:
+    import matplotlib
+    matplotlib.use("TkAgg")
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    _HAVE_MPL = True
+except Exception:
+    _HAVE_MPL = False
+
+# tables tab
+from .metrics_tables import MetricsTables
 
 
 class MetricsPanel(ttk.Frame):
-    """
-    Compatible Metrics panel for app.py.
+    def __init__(self, master, *args, **kwargs):
+        super().__init__(master, *args, **kwargs)
 
-    Supports:
-      - set_snapshot(snapshot_dict)
-      - set_history(list_of_snapshots)
-      - update_metrics(run_summary=..., snapshot=...)  # backward-friendly
+        # Top summary
+        self.box_summary = ttk.LabelFrame(self, text="Run Summary")
+        self.box_summary.pack(fill=tk.X, padx=8, pady=(8, 6))
 
-    Expects the current snapshot shape from src/metrics/metrics.py::metrics_snapshot():
-      {
-        "run": {...},
-        "per_learner": {...},
-        "clusters": [...]
-      }
-    But also tolerates older / alternate key names.
-    """
+        self.var_pairs = tk.StringVar(value="Pairs: —")
+        self.var_dup = tk.StringVar(value="Duplicate: —")
+        self.var_near = tk.StringVar(value="Near-duplicate: —")
+        self.var_non = tk.StringVar(value="Non-duplicate: —")
+        self.var_unc = tk.StringVar(value="Uncertain: —")
+        self.var_cons = tk.StringVar(value="Consensus: —")
+        self.var_esc = tk.StringVar(value="Escalations: —")
 
-    def __init__(self, master, *, text: str = "Metrics"):
-        super().__init__(master, padding=8)
-        self._last_snapshot: Dict[str, Any] = {}
-        self._last_history: List[Dict[str, Any]] = []
+        row = ttk.Frame(self.box_summary)
+        row.pack(fill=tk.X, padx=8, pady=4)
+        for i, v in enumerate(
+            [self.var_pairs, self.var_dup, self.var_near, self.var_non, self.var_unc, self.var_cons, self.var_esc]
+        ):
+            ttk.Label(row, textvariable=v).grid(row=0 if i < 4 else 1, column=i % 4, sticky="w", padx=(0, 16))
 
-        self._build_ui(text)
-
-    # ---------- UI ----------
-    def _build_ui(self, text: str):
-        # Header
-        header = ttk.Frame(self)
-        header.pack(fill=tk.X)
-        ttk.Label(header, text=text, font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT)
-        ttk.Button(header, text="Export JSON…", command=self._export_current).pack(side=tk.RIGHT)
-
-        # Summary box
-        self.summary_frame = ttk.LabelFrame(self, text="Run summary")
-        self.summary_frame.pack(fill=tk.X, pady=(8, 6))
-        self._summary_labels: Dict[str, ttk.Label] = {}
-        self._make_summary_grid(self.summary_frame)
-
-        # Notebook for per-learner metrics
+        # Middle: learner tabs
         self.nb = ttk.Notebook(self)
-        self.nb.pack(fill=tk.BOTH, expand=True)
-        self._learner_tabs: Dict[str, Dict[str, Any]] = {}
+        self.nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-    def _make_summary_grid(self, parent: ttk.LabelFrame):
-        grid_items = [
-            ("pairs_scored", "Pairs"),
-            ("duplicates", "Duplicates"),
-            ("non_duplicates", "Non-duplicates"),
-            ("uncertain", "Uncertain"),
-            ("consensus_rate", "Consensus %"),
-            ("escalations_rate", "Escalations %"),
-            ("clusters", "Clusters"),
-            ("epochs_run", "Self-learning epochs"),
-        ]
-        for i, (key, label) in enumerate(grid_items):
-            r, c = divmod(i, 4)
-            cell = ttk.Frame(parent)
-            cell.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
-            ttk.Label(cell, text=label, foreground="#666").pack(anchor="w")
-            val = ttk.Label(cell, text="—")
-            val.pack(anchor="w")
-            self._summary_labels[key] = val
-        for c in range(4):
-            parent.grid_columnconfigure(c, weight=1)
+        self.tables_tab = MetricsTables(self.nb)
 
-    def _ensure_learner_tab(self, name: str):
-        if name in self._learner_tabs:
-            return
-        frame = ttk.Frame(self.nb, padding=8)
-        self.nb.add(frame, text=name)
+        # Bottom: consensus / escalations
+        self.box_diag = ttk.LabelFrame(self, text="Consensus & Escalations")
+        self.box_diag.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.var_agree = tk.StringVar(value="Agreement: —")
+        self.var_voters = tk.StringVar(value="Voter share: —")
+        self.var_escal = tk.StringVar(value="Escalations: —")
+        ttk.Label(self.box_diag, textvariable=self.var_agree).pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Label(self.box_diag, textvariable=self.var_voters).pack(anchor="w", padx=8, pady=(2, 0))
+        ttk.Label(self.box_diag, textvariable=self.var_escal).pack(anchor="w", padx=8, pady=(2, 8))
 
-        # Top KPIs
-        top = ttk.Frame(frame)
-        top.pack(fill=tk.X)
-        labels = {
-            "n": ttk.Label(top, text="N: —"),
-            "pos_rate": ttk.Label(top, text="PosRate: —"),
-            "auc": ttk.Label(top, text="AUC: —"),
-            "brier": ttk.Label(top, text="Brier: —"),
-            "threshold": ttk.Label(top, text="Threshold: —"),
-            "target_precision": ttk.Label(top, text="Target precision: —"),
-        }
-        for k in ("n", "pos_rate", "auc", "brier", "threshold", "target_precision"):
-            labels[k].pack(side=tk.LEFT, padx=(0, 16))
+        self._last_snapshot = None
 
-        # Reliability table
-        lf = ttk.LabelFrame(frame, text="Reliability (expected vs observed)")
-        lf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        cols = ("prob_center", "expected", "observed", "count")
-        tree = ttk.Treeview(lf, columns=cols, show="headings", height=8, selectmode="browse")
-        headings = [
-            ("prob_center", "Bin prob"),
-            ("expected", "Expected pos-rate"),
-            ("observed", "Observed pos-rate"),
-            ("count", "Count"),
-        ]
-        for cid, label in headings:
-            tree.heading(cid, text=label)
-            anchor = tk.CENTER if cid != "count" else tk.E
-            w = 120 if cid != "count" else 80
-            tree.column(cid, width=w, anchor=anchor, stretch=True)
-        vs = ttk.Scrollbar(lf, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=vs.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vs.pack(side=tk.LEFT, fill=tk.Y)
+    # Public entry
+    def update_metrics(self, run_summary: Dict[str, Any], snapshot: Dict[str, Any]):
+        self._last_snapshot = snapshot
+        self._fill_summary(run_summary)
+        self._build_learner_tabs(snapshot)
+        self._fill_consensus(snapshot)
+        if hasattr(self, "tables_tab"):
+            self.tables_tab.update_tables(snapshot)
 
-        self._learner_tabs[name] = {"frame": frame, "labels": labels, "tree": tree}
+    # private
 
-    # ---------- Public API (expected by app.py) ----------
-    def set_snapshot(self, snapshot: Optional[Dict[str, Any]]):
-        """Accepts the full metrics snapshot dict from metrics_snapshot()."""
-        self._last_snapshot = snapshot or {}
+    def _fill_summary(self, run_summary: Dict[str, Any]):
+        pairs = run_summary.get("pairs_scored") or run_summary.get("total_pairs") or run_summary.get("pairs") or "—"
+        self.var_pairs.set(f"Pairs: {pairs}")
+        self.var_dup.set(f"Duplicate: {run_summary.get('duplicates', '—')}")
+        nd = run_summary.get("near_duplicates")
+        if nd is not None:
+            self.var_near.set(f"Near-duplicate: {nd}")
+        self.var_non.set(f"Non-duplicate: {run_summary.get('non_duplicates', '—')}")
+        self.var_unc.set(f"Uncertain: {run_summary.get('uncertain', '—')}")
+        cr = run_summary.get("consensus_rate")
+        self.var_cons.set(f"Consensus: {cr*100:.1f}%" if isinstance(cr, (int, float)) else "Consensus: —")
+        er = run_summary.get("escalations_rate") or run_summary.get("escalations_pct")
+        self.var_esc.set(f"Escalations: {er*100:.1f}%" if isinstance(er, (int, float)) else "Escalations: —")
 
-        # Extract normalized views
-        run = self._extract_run_summary(self._last_snapshot)
-        per_learner = self._extract_per_learner(self._last_snapshot)
-        clusters = self._extract_clusters(self._last_snapshot)
+    def _build_learner_tabs(self, snapshot: Dict[str, Any]):
+        for tab_id in self.nb.tabs():
+            self.nb.forget(tab_id)
 
-        # Render
-        self._render_summary(run, clusters_count=len(clusters))
-        self._render_learners(per_learner)
+        per_learner = snapshot.get("per_learner", {}) or {}
+        charts = snapshot.get("charts", {}) or {}
+        thresholds = snapshot.get("thresholds", {}) or {}
 
-    def set_history(self, history: Optional[List[Dict[str, Any]]]):
-        """Optional history support; stored for export or future diff UI."""
-        self._last_history = history or []
+        for name in sorted(per_learner.keys()):
+            tab = ttk.Frame(self.nb)
+            self.nb.add(tab, text=name.capitalize())
 
-    # Back-compat helper some code paths may call
-    def update_metrics(self, *, run_summary: Optional[Dict[str, Any]] = None, snapshot: Optional[Dict[str, Any]] = None):
-        if snapshot is not None:
-            self.set_snapshot(snapshot)
-        if run_summary is not None:
-            # If someone passes a raw run_summary, render it over current snapshot-derived data
-            clusters = self._extract_clusters(self._last_snapshot)
-            self._render_summary(run_summary, clusters_count=len(clusters))
+            # Top: table with AUC/Brier/ECE/threshold & PR@thr
+            head = ttk.LabelFrame(tab, text="Summary")
+            head.pack(fill=tk.X, padx=8, pady=(8, 6))
 
-    # ---------- Rendering ----------
-    def _render_summary(self, run_summary: Dict[str, Any], *, clusters_count: int):
-        def _pct(x):
+            pl = per_learner.get(name, {})
+            thr = thresholds.get(name, {})
+            row1 = ttk.Frame(head)
+            row1.pack(fill=tk.X, padx=8, pady=4)
+            ttk.Label(row1, text=f"AUC: {pl.get('auc', 0.0):.3f}").pack(side=tk.LEFT, padx=(0, 16))
+            ttk.Label(row1, text=f"Brier: {pl.get('brier', 0.0):.3f}").pack(side=tk.LEFT, padx=(0, 16))
+            ece = pl.get("ece")
+            if isinstance(ece, (int, float)):
+                ttk.Label(row1, text=f"ECE: {ece:.3f}").pack(side=tk.LEFT, padx=(0, 16))
+
+            row2 = ttk.Frame(head)
+            row2.pack(fill=tk.X, padx=8, pady=(0, 4))
+            if thr.get("threshold") is not None:
+                ttk.Label(row2, text=f"Threshold: {float(thr['threshold']):.3f}").pack(side=tk.LEFT, padx=(0, 16))
+            if thr.get("precision") is not None:
+                ttk.Label(row2, text=f"Precision@thr: {thr['precision']:.3f}").pack(side=tk.LEFT, padx=(0, 16))
+            if thr.get("recall") is not None:
+                ttk.Label(row2, text=f"Recall@thr: {thr['recall']:.3f}").pack(side=tk.LEFT, padx=(0, 16))
+            if thr.get("f1") is not None:
+                ttk.Label(row2, text=f"F1@thr: {thr['f1']:.3f}").pack(side=tk.LEFT, padx=(0, 16))
+            if thr.get("near_band_share") is not None:
+                ttk.Label(row2, text=f"Near-band volume: {thr['near_band_share']*100:.1f}%").pack(side=tk.LEFT, padx=(0, 16))
+
+            # Middle: plots (Calibration / ROC / PR / Threshold sweep / Scores)
+            body = ttk.Notebook(tab)
+            body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+            caltab = ttk.Frame(body)
+            body.add(caltab, text="Calibration")
+            roctab = ttk.Frame(body)
+            body.add(roctab, text="ROC")
+            prtab = ttk.Frame(body)
+            body.add(prtab, text="PR")
+            thrstab = ttk.Frame(body)
+            body.add(thrstab, text="Threshold Sweep")
+            histtab = ttk.Frame(body)
+            body.add(histtab, text="Scores")
+
+            chart = charts.get(name, {}) or {}
+            self._plot_calibration(caltab, chart)
+            self._plot_roc(roctab, chart)
+            self._plot_pr(prtab, chart)
+            self._plot_thr_sweep(thrstab, chart)
+            self._plot_hist(histtab, chart)
+
+        self.nb.add(self.tables_tab, text="Tables")
+        self.tables_tab.update_tables(snapshot)
+
+    def _fill_consensus(self, snapshot: Dict[str, Any]):
+        cons = snapshot.get("consensus", {}) or {}
+        learners = cons.get("learners") or []
+        mat = cons.get("agreement") or []
+        voters = cons.get("voter_share") or {}
+        if learners and mat:
+            vals = []
+            for i in range(len(learners)):
+                for j in range(len(learners)):
+                    if i == j:
+                        continue
+                    try:
+                        vals.append(float(mat[i][j]))
+                    except Exception:
+                        pass
+            if vals:
+                self.var_agree.set(f"Agreement (avg pairwise): {100.0 * sum(vals) / len(vals):.1f}%")
+        if voters:
+            parts = [f"{k}: {v*100:.1f}%" for k, v in sorted(voters.items())]
+            self.var_voters.set("Voter share (+): " + ", ".join(parts))
+        esc = snapshot.get("escalations", {}) or {}
+        rate = esc.get("rate")
+        by_step = esc.get("by_step", {})
+        if isinstance(rate, (int, float)):
+            steps = ", ".join(f"{k}:{v}" for k, v in by_step.items()) if by_step else "—"
+            self.var_escal.set(f"Escalations: {rate*100:.1f}%  |  Steps: {steps}")
+
+    # plotting helpers
+
+    def _clear_children(self, parent: tk.Widget):
+        for w in parent.winfo_children():
             try:
-                return f"{float(x) * 100.0:.1f}%"
+                w.destroy()
             except Exception:
-                return "—"
+                pass
 
-        # map to UI keys; tolerate several naming schemes
-        mapping = {
-            "pairs_scored": run_summary.get("total_pairs")
-                             or run_summary.get("pairs_scored")
-                             or run_summary.get("pairs")
-                             or 0,
-            "duplicates": run_summary.get("duplicates") or 0,
-            "non_duplicates": run_summary.get("non_duplicates") or 0,
-            "uncertain": run_summary.get("uncertain") or 0,
-            "consensus_rate": _pct(
-                run_summary.get("consensus_rate")
-                if isinstance(run_summary.get("consensus_rate"), (int, float))
-                else run_summary.get("consensus")
-            ),
-            "escalations_rate": _pct(
-                run_summary.get("escalations_pct")
-                if isinstance(run_summary.get("escalations_pct"), (int, float))
-                else run_summary.get("escalations_rate")
-                if isinstance(run_summary.get("escalations_rate"), (int, float))
-                else run_summary.get("escalations")
-            ),
-            "clusters": clusters_count,
-            "epochs_run": run_summary.get("epochs_run") or run_summary.get("self_learning_epochs"),
-        }
-        for k, lbl in self._summary_labels.items():
-            val = mapping.get(k)
-            lbl.configure(text=("—" if val is None else str(val)))
-
-    def _render_learners(self, per_learner: Dict[str, Any]):
-        # Add/update tabs
-        for name, info in sorted(per_learner.items()):
-            self._ensure_learner_tab(name)
-            tab = self._learner_tabs[name]
-            labels = tab["labels"]
-
-            # Support either 'reliability' or 'reliability_bins'
-            bins = info.get("reliability")
-            if bins is None:
-                bins = info.get("reliability_bins")
-
-            n = info.get("n")
-            pr = info.get("pos_rate")
-            auc = info.get("auc")
-            brier = info.get("brier")
-            thr = info.get("threshold")
-            tprec = info.get("target_precision")
-
-            labels["n"].configure(text=f"N: {int(n)}" if isinstance(n, (int, float)) else "N: —")
-            labels["pos_rate"].configure(text=f"PosRate: {float(pr):.3f}" if isinstance(pr, (int, float)) else "PosRate: —")
-            labels["auc"].configure(text=f"AUC: {float(auc):.3f}" if isinstance(auc, (int, float)) else "AUC: —")
-            labels["brier"].configure(text=f"Brier: {float(brier):.4f}" if isinstance(brier, (int, float)) else "Brier: —")
-            labels["threshold"].configure(text=f"Threshold: {float(thr):.3f}" if isinstance(thr, (int, float)) else "Threshold: —")
-            labels["target_precision"].configure(text=f"Target precision: {float(tprec):.3f}" if isinstance(tprec, (int, float)) else "Target precision: —")
-
-            self._fill_reliability(tab["tree"], bins)
-
-        # Remove tabs that are no longer present
-        present = set(per_learner.keys())
-        stale = [n for n in list(self._learner_tabs.keys()) if n not in present]
-        for n in stale:
-            tab = self._learner_tabs.pop(n, None)
-            if tab:
-                try:
-                    idx = self.nb.index(tab["frame"])
-                    self.nb.forget(idx)
-                except Exception:
-                    pass
-
-        # Ensure a selection exists
-        try:
-            if self.nb.index("end") > 0 and not self.nb.select():
-                self.nb.select(0)
-        except Exception:
-            pass
-
-    def _fill_reliability(self, tree: ttk.Treeview, bins: Any):
-        # Clear table
-        for iid in tree.get_children():
-            tree.delete(iid)
-
-        if not isinstance(bins, (list, tuple)):
+    def _plot_calibration(self, parent, chart: Dict[str, Any]):
+        self._clear_children(parent)
+        if not _HAVE_MPL:
+            ttk.Label(parent, text="Matplotlib not available").pack(padx=8, pady=8)
             return
-        for b in bins:
-            try:
-                pc = float(b.get("prob_center", float("nan")))
-                ex = float(b.get("expected_pos_rate", float("nan")))
-                ob = float(b.get("observed_pos_rate", float("nan")))
-                ct = int(b.get("count", 0))
-                tree.insert("", tk.END, values=(f"{pc:.3f}", f"{ex:.3f}", f"{ob:.3f}", f"{ct}"))
-            except Exception:
-                continue
+        rel = chart.get("reliability") or []
+        xs = [r.get("expected_pos_rate", 0.0) for r in rel]
+        ys = [r.get("observed_pos_rate", 0.0) for r in rel]
+        fig = Figure(figsize=(5.2, 3.4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot([0, 1], [0, 1], linestyle="--", alpha=0.5)
+        ax.plot(xs, ys, marker="o")
+        ax.set_xlabel("Predicted probability")
+        ax.set_ylabel("Observed positive rate")
+        ax.set_title("Reliability curve")
+        ax.grid(True, alpha=0.3)
+        FigureCanvasTkAgg(fig, parent).get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    # ---------- Extractors / normalizers ----------
-    def _extract_run_summary(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        # Prefer new shape
-        run = snapshot.get("run")
-        if isinstance(run, dict):
-            return run
-        # Or accept a flattened older shape
-        return snapshot.get("run_summary") or {}
+    def _plot_roc(self, parent, chart: Dict[str, Any]):
+        self._clear_children(parent)
+        if not _HAVE_MPL:
+            ttk.Label(parent, text="Matplotlib not available").pack(padx=8, pady=8)
+            return
+        roc = chart.get("roc") or {}
+        fpr = roc.get("fpr") or [0.0, 1.0]
+        tpr = roc.get("tpr") or [0.0, 1.0]
+        auc = roc.get("auc")
+        fig = Figure(figsize=(5.2, 3.4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot(fpr, tpr)
+        ax.plot([0, 1], [0, 1], linestyle="--", alpha=0.5)
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title(f"ROC (AUC={auc:.3f})" if isinstance(auc, (int, float)) else "ROC")
+        ax.grid(True, alpha=0.3)
+        FigureCanvasTkAgg(fig, parent).get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def _extract_per_learner(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        pl = snapshot.get("per_learner")
-        if isinstance(pl, dict):
-            return pl
-        # some older shapes: snapshot["learners"]
-        return snapshot.get("learners") or {}
+    def _plot_pr(self, parent, chart: Dict[str, Any]):
+        self._clear_children(parent)
+        if not _HAVE_MPL:
+            ttk.Label(parent, text="Matplotlib not available").pack(padx=8, pady=8)
+            return
+        pr = chart.get("pr") or {}
+        precision = pr.get("precision") or [1.0, 0.0]
+        recall = pr.get("recall") or [0.0, 1.0]
+        fig = Figure(figsize=(5.2, 3.4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot(recall, precision)
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_title("Precision–Recall")
+        ax.grid(True, alpha=0.3)
+        FigureCanvasTkAgg(fig, parent).get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def _extract_clusters(self, snapshot: Dict[str, Any]) -> List[Any]:
-        cl = snapshot.get("clusters")
-        return cl if isinstance(cl, list) else []
+    def _plot_thr_sweep(self, parent, chart: Dict[str, Any]):
+        self._clear_children(parent)
+        if not _HAVE_MPL:
+            ttk.Label(parent, text="Matplotlib not available").pack(padx=8, pady=8)
+            return
+        ts = chart.get("thr_sweep") or {}
+        th = ts.get("thresholds") or [0.0, 1.0]
+        prec = ts.get("precision") or [1.0, 1.0]
+        rec = ts.get("recall") or [0.0, 1.0]
+        f1 = ts.get("f1") or [0.0, 1.0]
+        fig = Figure(figsize=(5.2, 3.4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.plot(th, prec, label="Precision")
+        ax.plot(th, rec, label="Recall")
+        ax.plot(th, f1, label="F1")
+        ax.set_xlabel("Threshold")
+        ax.set_ylabel("Score")
+        ax.set_ylim(0.0, 1.05)
+        ax.set_title("Threshold sweep")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        FigureCanvasTkAgg(fig, parent).get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    # ---------- Export ----------
-    def _export_current(self):
-        data = {
-            "metrics_snapshot": self._last_snapshot,
-            "history": self._last_history,
-        }
-        try:
-            path = filedialog.asksaveasfilename(
-                title="Export metrics JSON",
-                defaultextension=".json",
-                filetypes=[("JSON", "*.json"), ("All files", "*.*")],
-                initialfile="metrics_snapshot.json",
-            )
-            if not path:
-                return
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Export", f"Saved metrics to:\n{path}")
-        except Exception as e:
-            messagebox.showerror("Export failed", str(e))
+    def _plot_hist(self, parent, chart: Dict[str, Any]):
+        self._clear_children(parent)
+        if not _HAVE_MPL:
+            ttk.Label(parent, text="Matplotlib not available").pack(padx=8, pady=8)
+            return
+        hist = chart.get("hist") or {}
+        edges = hist.get("bin_edges") or [0.0, 1.0]
+        pos = hist.get("pos") or [0]
+        neg = hist.get("neg") or [0]
+        edges = list(edges)
+        centers = [(edges[i] + edges[i + 1]) / 2.0 for i in range(len(edges) - 1)]
+        width = (edges[1] - edges[0]) * 0.9 if len(edges) > 1 else 0.05
+        fig = Figure(figsize=(5.2, 3.4), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.bar(centers, neg, width=width, alpha=0.6, label="negatives")
+        ax.bar(centers, pos, width=width, alpha=0.6, label="positives")
+        ax.set_xlabel("Calibrated probability")
+        ax.set_ylabel("Count")
+        ax.set_title("Score distribution")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        FigureCanvasTkAgg(fig, parent).get_tk_widget().pack(fill=tk.BOTH, expand=True)

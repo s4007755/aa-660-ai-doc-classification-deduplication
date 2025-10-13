@@ -1,4 +1,3 @@
-# src/gui/widgets/run_history.py
 from __future__ import annotations
 
 import json
@@ -15,10 +14,29 @@ try:
 except Exception:
     _store = None
 
+try:
+    from src.metrics.metrics import metrics_snapshot
+except Exception:
+    metrics_snapshot = None
+
 # Callback signatures
 _LoadRuns = Optional[Callable[[], List[Dict[str, Any]]]]
 _LoadDetails = Optional[Callable[[int], Dict[str, Any]]]
 _OpenReport = Optional[Callable[[int], Optional[str]]]
+
+
+def _s(x: Any) -> str:
+    if x is None:
+        return ""
+    t = str(x)
+    return "" if t.strip() in ("None", "—") else t
+
+
+def _pct_or_blank(x: Any) -> str:
+    try:
+        return f"{float(x) * 100.0:.1f}%"
+    except Exception:
+        return ""
 
 
 class RunHistory(ttk.Frame):
@@ -144,8 +162,9 @@ class RunHistory(ttk.Frame):
             ("status", "Status"),
             ("notes", "Notes"),
             ("pairs_scored", "Pairs"),
-            ("duplicates", "Duplicates"),
-            ("non_duplicates", "Non-duplicates"),
+            ("exact_duplicates", "Exact duplicates"),
+            ("near_duplicates", "Near duplicates"),
+            ("duplicates_total", "Total duplicates"),
             ("uncertain", "Uncertain"),
             ("consensus_rate", "Consensus %"),
             ("escalations_rate", "Escalations %"),
@@ -158,7 +177,7 @@ class RunHistory(ttk.Frame):
             box = ttk.Frame(parent)
             box.grid(row=row, column=col, sticky="nsew", padx=6, pady=4)
             ttk.Label(box, text=lab, foreground="#666").pack(anchor="w")
-            val = ttk.Label(box, text="—")
+            val = ttk.Label(box, text="")
             val.pack(anchor="w")
             self._sum_labels[k] = val
         for c in range(2):
@@ -184,11 +203,11 @@ class RunHistory(ttk.Frame):
                 "",
                 tk.END,
                 values=(
-                    r.get("run_id", "—"),
-                    r.get("started_at", "—"),
-                    r.get("ended_at", "—"),
-                    r.get("status", "—"),
-                    (r.get("notes") or "—")[:200],
+                    _s(r.get("run_id")),
+                    _s(r.get("started_at")),
+                    _s(r.get("ended_at")),
+                    _s(r.get("status")),
+                    _s((r.get("notes") or "")[:200]),
                 ),
             )
 
@@ -227,8 +246,8 @@ class RunHistory(ttk.Frame):
 
     def _render_detail(self, d: Optional[Dict[str, Any]]):
         # Clear summary labels
-        for k, lbl in self._sum_labels.items():
-            lbl.configure(text="—")
+        for _, lbl in self._sum_labels.items():
+            lbl.configure(text="")
 
         # Clear config text
         self.txt_cfg.configure(state="normal")
@@ -241,13 +260,6 @@ class RunHistory(ttk.Frame):
         if not d:
             return
 
-        # Summary values
-        def _pct(x):
-            try:
-                return f"{float(x) * 100.0:.1f}%"
-            except Exception:
-                return "—"
-
         mapping = {
             "run_id": d.get("run_id"),
             "started_at": d.get("started_at"),
@@ -255,14 +267,15 @@ class RunHistory(ttk.Frame):
             "status": d.get("status"),
             "notes": d.get("notes"),
             "pairs_scored": d.get("pairs_scored") or d.get("pairs"),
-            "duplicates": d.get("duplicates"),
-            "non_duplicates": d.get("non_duplicates"),
+            "exact_duplicates": d.get("exact_duplicates"),
+            "near_duplicates": d.get("near_duplicates"),
+            "duplicates_total": d.get("duplicates_total"),
             "uncertain": d.get("uncertain"),
-            "consensus_rate": _pct(d.get("consensus_rate", d.get("consensus_pct"))),
-            "escalations_rate": _pct(d.get("escalations_rate", d.get("escalations_pct"))),
+            "consensus_rate": _pct_or_blank(d.get("consensus_rate", d.get("consensus_pct"))),
+            "escalations_rate": _pct_or_blank(d.get("escalations_rate", d.get("escalations_pct"))),
             "clusters": d.get("clusters"),
             "epochs_run": d.get("epochs_run"),
-            "report_path": d.get("report_path"),
+            "report_path": os.path.basename(d.get("report_path") or "") if d.get("report_path") else "",
         }
         for k, v in mapping.items():
             if k in self._sum_labels and v is not None:
@@ -281,11 +294,11 @@ class RunHistory(ttk.Frame):
         # Calibrations list
         cals = d.get("calibrations") or []
         for row in cals:
-            learner = row.get("learner_name") or row.get("learner") or "—"
-            method = row.get("method") or "—"
-            threshold = "—"
+            learner = row.get("learner_name") or row.get("learner") or ""
+            method = row.get("method") or ""
+            threshold = ""
             try:
-                params = row.get("params_json")
+                params = row.get("params_json") or row.get("params")
                 if isinstance(params, str):
                     params = json.loads(params)
                 thr = params.get("threshold") if isinstance(params, dict) else None
@@ -296,7 +309,7 @@ class RunHistory(ttk.Frame):
             except Exception:
                 pass
             try:
-                rb = row.get("reliability_json")
+                rb = row.get("reliability_json") or row.get("reliability")
                 if isinstance(rb, str):
                     rb = json.loads(rb)
                 rbcnt = len(rb) if isinstance(rb, list) else 0
@@ -416,51 +429,106 @@ class RunHistory(ttk.Frame):
         d: Dict[str, Any] = {}
         if _store is None:
             return d
-        # run meta
+
+        # Run meta
         if hasattr(_store, "get_run"):
             try:
                 d.update(_store.get_run(run_id) or {})
             except Exception:
                 pass
-        # config
+
+        # Config
         if "config_json" not in d and hasattr(_store, "get_run_config"):
             try:
                 d["config_json"] = _store.get_run_config(run_id)
             except Exception:
                 pass
-        # calibrations
+
+        # Calibrations
         if hasattr(_store, "get_calibrations_for_run"):
             try:
                 d["calibrations"] = _store.get_calibrations_for_run(run_id)
             except Exception:
-                pass
-        # summary (preferred)
+                if hasattr(_store, "get_calibrations"):
+                    try:
+                        d["calibrations"] = _store.get_calibrations(run_id)
+                    except Exception:
+                        pass
+
+        # Preferred summary
         if hasattr(_store, "get_run_summary"):
             try:
                 d.update(_store.get_run_summary(run_id) or {})
             except Exception:
                 pass
-        if (not d.get("pairs_scored")) and hasattr(_store, "get_decisions"):
+
+        dec_rows = []
+        if hasattr(_store, "get_decisions"):
             try:
-                rows = _store.get_decisions(run_id, limit=1_000_000)
-                pairs = 0; dup = 0; nd = 0; unc = 0
-                for r in rows:
-                    pairs += 1
-                    try:
-                        tj = json.loads(r["trace_json"])
-                        lab = tj.get("final_label")
-                    except Exception:
-                        lab = None
-                    if lab == "DUPLICATE": dup += 1
-                    elif lab == "NON_DUPLICATE": nd += 1
-                    elif lab == "UNCERTAIN": unc += 1
-                d["pairs_scored"] = pairs
-                d["duplicates"] = dup
-                d["non_duplicates"] = nd
-                d["uncertain"] = unc
+                dec_rows = _store.get_decisions(run_id, limit=1_000_000)
+            except Exception:
+                dec_rows = []
+
+        traces_json: List[Dict[str, Any]] = []
+        for r in dec_rows:
+            try:
+                traces_json.append(json.loads(r.get("trace_json") or "{}"))
             except Exception:
                 pass
-        # stored report path
+
+        # Counters (exact/near/uncertain) from stored traces
+        pairs = len(traces_json)
+        exact = 0
+        near = 0
+        unc = 0
+        for t in traces_json:
+            fl = (t.get("final_label") or "").upper()
+            if fl == "DUPLICATE":
+                if (t.get("dup_kind") or "").upper() == "EXACT":
+                    exact += 1
+                else:
+                    near += 1
+            elif fl == "UNCERTAIN":
+                unc += 1
+
+        # Snapshot-derived metrics
+        if metrics_snapshot is not None:
+            try:
+                snap = metrics_snapshot(_as_traces_for_snapshot(traces_json), pseudo_labels={})
+            except Exception:
+                snap = {}
+        else:
+            snap = {}
+
+        run_snap = snap.get("run", {}) if isinstance(snap, dict) else {}
+
+        def _set_num(key: str, val: Any):
+            if isinstance(val, (int, float)):
+                cur = d.get(key)
+                if not isinstance(cur, (int, float)) or cur is None:
+                    d[key] = float(val)
+
+        if pairs and not d.get("pairs_scored"):
+            d["pairs_scored"] = pairs
+        d.setdefault("exact_duplicates", exact)
+        d.setdefault("near_duplicates", near)
+        d.setdefault("duplicates_total", exact + near)
+        d.setdefault("uncertain", unc)
+
+        # Consensus % from snapshot
+        _set_num("consensus_rate", run_snap.get("consensus_rate"))
+
+        # Escalations %
+        esc_from_snap = run_snap.get("escalations_rate", run_snap.get("escalations_pct"))
+        _set_num("escalations_rate", esc_from_snap)
+
+        # Clusters: use snapshot count
+        if not isinstance(d.get("clusters"), int):
+            cl = snap.get("clusters") or []
+            if isinstance(cl, list):
+                d["clusters"] = len(cl)
+
+        # Stored report path
         if hasattr(_store, "get_report_path"):
             try:
                 rp = _store.get_report_path(run_id)
@@ -468,6 +536,7 @@ class RunHistory(ttk.Frame):
                     d["report_path"] = rp
             except Exception:
                 pass
+
         return d
 
     def _default_open_report(self, run_id: int) -> Optional[str]:
@@ -499,3 +568,34 @@ class RunHistory(ttk.Frame):
             return new_path
         except Exception:
             return None
+
+
+# Helper: adapt traces for metrics_snapshot without importing the full class
+def _as_traces_for_snapshot(traces_json: List[Dict[str, Any]]):
+    from types import SimpleNamespace
+    out = []
+    for obj in traces_json:
+        ln = {}
+        for k, v in (obj.get("learners") or {}).items():
+            try:
+                prob = float(v.get("prob", 0.0))
+            except Exception:
+                prob = 0.0
+            thr = v.get("threshold", None)
+            try:
+                thr = float(thr) if thr is not None else None
+            except Exception:
+                thr = None
+            ln[k] = SimpleNamespace(prob=prob, threshold=thr)
+        out.append(
+            SimpleNamespace(
+                pair_key=obj.get("pair_key"),
+                a_id=obj.get("a_id"),
+                b_id=obj.get("b_id"),
+                final_label=obj.get("final_label"),
+                agreed_learners=obj.get("agreed_learners", []),
+                escalation_steps=obj.get("escalation_steps", []),
+                learner_outputs=ln,
+            )
+        )
+    return out

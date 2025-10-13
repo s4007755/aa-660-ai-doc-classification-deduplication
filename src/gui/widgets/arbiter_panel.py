@@ -114,7 +114,6 @@ class ArbiterPanel(ttk.LabelFrame):
         self._load_steps(cfg.escalation_order or _DEFAULT_STEPS)
         self._emit_change()
 
-    # small convenience for your presets
     def set_gray_zone(self, margin: float) -> None:
         self.var_gray.set(float(margin))
         self._emit_change()

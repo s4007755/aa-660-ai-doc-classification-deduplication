@@ -6,6 +6,7 @@ import os
 import random
 import time
 import threading
+import time
 import traceback
 from typing import Any, Dict, List, Optional, Iterable
 import sqlite3
@@ -98,6 +99,10 @@ class App(tk.Tk):
         self.pipeline_result: Optional[Dict[str, Any]] = None
         self.running = False
 
+        # timer state
+        self._elapsed_job: Optional[str] = None
+        self._run_start_ts: Optional[float] = None
+
         self._build_ui()
         self._refresh_docs_from_db()
         self._refresh_docs_tab()
@@ -114,7 +119,7 @@ class App(tk.Tk):
         self.tab_history = ttk.Frame(nb)
         self.tab_docs = ttk.Frame(nb)
 
-        nb.add(self.tab_mode, text="Main")
+        nb.add(self.tab_mode, text="Run")
         nb.add(self.tab_traces, text="Decision Traces")
         nb.add(self.tab_metrics, text="Metrics")
         nb.add(self.tab_history, text="Run History")
@@ -140,19 +145,28 @@ class App(tk.Tk):
         bar = ttk.Frame(parent, padding=8)
         bar.pack(fill=tk.X)
 
-        self.lbl_docs = ttk.Label(bar, text="Docs: —")
-        self.lbl_docs.pack(side=tk.LEFT)
+        # Right side: run controls and files counter
+        controls = ttk.Frame(bar)
+        controls.pack(side=tk.RIGHT)
 
-        ttk.Button(bar, text="Refresh docs", command=lambda: [self._refresh_docs_from_db(), self._refresh_docs_tab()]).pack(side=tk.LEFT, padx=(10, 0))
+        # Files counter
+        self.lbl_files = ttk.Label(controls, text="Files: —")
+        self.lbl_files.pack(side=tk.LEFT, padx=(0, 12))
 
-        self.btn_run = ttk.Button(bar, text="Run", command=self._on_run_clicked)
+        # Left side: refresh files button
+        ttk.Button(
+            bar,
+            text="Refresh files",
+            command=lambda: [self._refresh_docs_from_db(), self._refresh_docs_tab()],
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        self.btn_run = ttk.Button(controls, text="Run", command=self._on_run_clicked)
         self.btn_run.pack(side=tk.RIGHT)
 
-        # Split: left controls / right status
         main = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         main.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        # LEFT: put a scrollable frame
+        # LEFT: scrollable frame
         left_wrap = ttk.Frame(main)
         right = ttk.Frame(main)
         main.add(left_wrap, weight=1)
@@ -160,7 +174,7 @@ class App(tk.Tk):
 
         left_scroller = VScrollFrame(left_wrap)
         left_scroller.pack(fill=tk.BOTH, expand=True)
-        left = left_scroller.inner   # place controls inside this frame
+        left = left_scroller.inner
 
         # Profiles row
         prof = ttk.LabelFrame(left, text="Profile")
@@ -177,22 +191,35 @@ class App(tk.Tk):
         cb.pack(side=tk.LEFT)
         ttk.Button(prof, text="Apply preset", command=self._apply_preset).pack(side=tk.LEFT, padx=(8, 8))
 
-        # Learners
-        self.card_sim = LearnerCard(left, learner_name="SimHash", kind="simhash", config=LearnerConfig(), collapsed=True)
+        # Advanced settings toggle
+        toggle_row = ttk.Frame(left)
+        toggle_row.pack(fill=tk.X, padx=4, pady=(0, 6))
+        self.var_show_adv = tk.BooleanVar(value=False)
+        self.btn_toggle_adv = ttk.Checkbutton(
+            toggle_row,
+            text="Advanced settings ▸",
+            variable=self.var_show_adv,
+            command=self._toggle_advanced_section,
+            style="Toolbutton",
+        )
+        self.btn_toggle_adv.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Advanced container
+        self.adv_container = ttk.LabelFrame(left, text="Advanced")
+        # contents of advanced:
+        self.card_sim = LearnerCard(self.adv_container, learner_name="SimHash", kind="simhash", config=LearnerConfig(), collapsed=True)
         self.card_sim.pack(fill=tk.X, padx=4, pady=(0, 6))
 
-        self.card_min = LearnerCard(left, learner_name="MinHash", kind="minhash", config=LearnerConfig(), collapsed=True)
+        self.card_min = LearnerCard(self.adv_container, learner_name="MinHash", kind="minhash", config=LearnerConfig(), collapsed=True)
         self.card_min.pack(fill=tk.X, padx=4, pady=(0, 6))
 
-        self.card_emb = LearnerCard(left, learner_name="Embedding", kind="embedding", config=LearnerConfig(), collapsed=True)
+        self.card_emb = LearnerCard(self.adv_container, learner_name="Embedding", kind="embedding", config=LearnerConfig(), collapsed=True)
         self.card_emb.pack(fill=tk.X, padx=4, pady=(0, 6))
 
-        # Arbiter
-        self.arbiter_panel = ArbiterPanel(left, config=ArbiterConfig(), text="Consensus & Escalation")
+        self.arbiter_panel = ArbiterPanel(self.adv_container, config=ArbiterConfig(), text="Consensus & Escalation")
         self.arbiter_panel.pack(fill=tk.X, padx=4, pady=(0, 6))
 
-        # Self-learning & candidates
-        misc = ttk.LabelFrame(left, text="Self-learning & Candidate Generation")
+        misc = ttk.LabelFrame(self.adv_container, text="Self-learning & Candidate Generation")
         misc.pack(fill=tk.X, padx=4, pady=(0, 12))
 
         # Self-learning
@@ -227,16 +254,47 @@ class App(tk.Tk):
         for c in range(4):
             misc.grid_columnconfigure(c, weight=1)
 
-        # Right: run status + quick metrics
+        # RIGHT: run status and quick metrics
         status = ttk.LabelFrame(right, text="Run status")
         status.pack(fill=tk.BOTH, expand=True, padx=4, pady=(6, 6))
 
         self.var_status = tk.StringVar(value="Idle")
-        ttk.Label(status, textvariable=self.var_status).pack(anchor="w", padx=8, pady=6)
+        ttk.Label(status, textvariable=self.var_status).pack(anchor="w", padx=8, pady=(6, 0))
 
+        # elapsed timer
+        timer_row = ttk.Frame(status)
+        timer_row.pack(fill=tk.X, padx=8, pady=(4, 8))
+        ttk.Label(timer_row, text="Elapsed:").pack(side=tk.LEFT)
+        self.var_elapsed = tk.StringVar(value="00:00:00")
+        ttk.Label(timer_row, textvariable=self.var_elapsed).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Live counters
+        counters = ttk.Frame(status)
+        counters.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.var_cnt_pairs = tk.StringVar(value="Pairs: —")
+        self.var_cnt_exact = tk.StringVar(value="Exact-duplicate: —")
+        self.var_cnt_near  = tk.StringVar(value="Near-duplicate: —")
+        self.var_cnt_unc   = tk.StringVar(value="Uncertain: —")
+        ttk.Label(counters, textvariable=self.var_cnt_pairs).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(counters, textvariable=self.var_cnt_exact).grid(row=0, column=1, sticky="w", padx=(0, 12))
+        ttk.Label(counters, textvariable=self.var_cnt_near).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(counters, textvariable=self.var_cnt_unc).grid(row=1, column=0, sticky="w", padx=(0, 12))
+
+        # Summary box
         self.txt_summary = tk.Text(status, height=16, wrap="word")
         self.txt_summary.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.txt_summary.configure(state="disabled")
+
+    def _toggle_advanced_section(self):
+        show = bool(self.var_show_adv.get())
+        self.btn_toggle_adv.configure(text="Advanced settings ▾" if show else "Advanced settings ▸")
+        try:
+            if show:
+                self.adv_container.pack(fill=tk.X, padx=4, pady=(0, 8))
+            else:
+                self.adv_container.pack_forget()
+        except Exception:
+            pass
 
     # Documents tab
     def _build_docs_tab(self, parent: ttk.Frame):
@@ -281,8 +339,11 @@ class App(tk.Tk):
     # Load docs from DB
     def _refresh_docs_from_db(self):
         pairs = sqlite_store.get_docs_text(include_dirty=False)
-        self.docs = [build_document_view(doc_id=did, text=(txt or ""), language=None, meta={}) for (did, txt) in pairs if (txt or "").strip()]
-        self.lbl_docs.configure(text=f"Docs: {len(self.docs)}")
+        self.docs = [
+            build_document_view(doc_id=did, text=(txt or ""), language=None, meta={})
+            for (did, txt) in pairs
+            if (txt or "").strip()
+        ]
 
     # CSV ingestion ADDED
     def _on_add_csv(self):  # CSV SUPPORT ADDED
@@ -335,7 +396,9 @@ class App(tk.Tk):
                 self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
 
             unique_docs = len({r.get("doc_id") for r in rows})
-            self.lbl_doc_count.configure(text=f"{len(rows)} files across {unique_docs} docs")
+            total_files = len(rows)
+            self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
+            self.lbl_files.configure(text=f"Files: {total_files}")
 
             self._refresh_docs_from_db()
 
@@ -357,7 +420,6 @@ class App(tk.Tk):
     # helper: try to pull calibrated thresholds from result
     def _thresholds_from_result(self, res: Dict[str, Any]) -> Dict[str, float]:
         out: Dict[str, float] = {}
-        # Look through several possible shapes
         candidates = []
         for k in ("calibration_snapshot", "calibration", "learner_states", "learners"):
             snap = res.get(k)
@@ -393,6 +455,8 @@ class App(tk.Tk):
         self.running = True
         self.btn_run.configure(state=tk.DISABLED)
         self.var_status.set("Starting…")
+        self._reset_counters()
+        self._start_timer()
 
         def worker():
             err = None
@@ -421,6 +485,7 @@ class App(tk.Tk):
     def _finish_run(self, result: Optional[Dict[str, Any]], err: Optional[BaseException]):
         self.running = False
         self.btn_run.configure(state=tk.NORMAL)
+        self._stop_timer()
 
         if err is not None:
             self.var_status.set("Error")
@@ -430,14 +495,15 @@ class App(tk.Tk):
         self.pipeline_result = result or {}
         self.var_status.set("Completed")
 
-        # Update summary text
+        # Update summary and counters
         self._render_summary(self.pipeline_result)
+        self._update_counters_from_result(self.pipeline_result)
 
         # Decision Traces with filenames
         traces = self.pipeline_result.get("traces") or []
         self.trace_view.set_traces(traces, doc_labels=self._doc_labels_from_db())
 
-        # MetricsPanel: normalize keys and use update_metrics()
+        # MetricsPanel
         raw_snap = self.pipeline_result.get("metrics_snapshot") or {}
         run_summary = (self.pipeline_result.get("run_summary") or raw_snap.get("run") or {})
 
@@ -445,16 +511,21 @@ class App(tk.Tk):
             run_summary = dict(run_summary)
             run_summary["escalations_rate"] = run_summary["escalations_pct"]
 
-        per_learner = raw_snap.get("per_learner", {})  # AUC/Brier/etc from pseudo labels
+        per_learner = raw_snap.get("per_learner", {})
         snap_norm = {
-            "learners": per_learner,
+            "per_learner": per_learner,
             "run": run_summary,
             "clusters": raw_snap.get("clusters", []),
+            "charts": raw_snap.get("charts", {}),
+            "thresholds": raw_snap.get("thresholds", {}),
+            "consensus": raw_snap.get("consensus", {}),
+            "escalations": raw_snap.get("escalations", {}),
         }
         self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm)
 
         # push numbers into learner cards header KPIs
         thresholds = self._thresholds_from_result(self.pipeline_result)
+
         def _num(x):
             try:
                 return float(x)
@@ -510,24 +581,53 @@ class App(tk.Tk):
         lines = []
         lines.append(f"Run ID: {res.get('run_id', '—')}")
         rs = res.get("run_summary") or {}
-        if rs:
-            pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs') or '—'
-            lines.append(f"Pairs: {pairs}")
-            lines.append(f"Duplicates: {rs.get('duplicates', '—')}")
-            lines.append(f"Non-duplicates: {rs.get('non_duplicates', '—')}")
-            lines.append(f"Uncertain: {rs.get('uncertain', '—')}")
-            cr = rs.get("consensus_rate")
-            er = rs.get("escalations_rate") or rs.get("escalations_pct")
-            if isinstance(cr, (int, float)):
-                lines.append(f"Consensus rate: {cr * 100:.1f}%")
-            if isinstance(er, (int, float)):
-                lines.append(f"Escalations: {er * 100:.1f}%")
+
+        # Prefer deriving exact/near from traces to avoid mismatches
+        traces = res.get("traces") or []
+        ex_calc = 0
+        nr_calc = 0
+        if traces:
+            for tr in traces:
+                try:
+                    t = tr.as_dict() if hasattr(tr, "as_dict") else tr
+                    if (t.get('final_label') or '').upper() == 'DUPLICATE':
+                        if (t.get('dup_kind') or '').upper() == 'EXACT':
+                            ex_calc += 1
+                        else:
+                            nr_calc += 1
+                except Exception:
+                    pass
+            ex = ex_calc
+            nr = nr_calc
+        else:
+            ex = rs.get('exact_duplicates', 0)
+            nr = rs.get('near_duplicates', 0)
+
+        # Pairs
+        pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs') or '—'
+        lines.append(f"Pairs: {pairs}")
+        lines.append(f"Exact-duplicate: {ex}")
+        lines.append(f"Near-duplicate: {nr}")
+        try:
+            lines.append(f"Duplicates (total): {int(ex) + int(nr)}")
+        except Exception:
+            pass
+
+        lines.append(f"Uncertain: {rs.get('uncertain', '—')}")
+        cr = rs.get("consensus_rate")
+        er = rs.get("escalations_rate") or rs.get("escalations_pct")
+        if isinstance(cr, (int, float)):
+            lines.append(f"Consensus rate: {cr * 100:.1f}%")
+        if isinstance(er, (int, float)):
+            lines.append(f"Escalations: {er * 100:.1f}%")
+
         clusters = res.get("clusters") or []
         if clusters:
             lines.append(f"Clusters: {len(clusters)}")
             top = min(5, len(clusters))
             for i in range(top):
                 lines.append(f"  - Cluster {i+1}: {len(clusters[i])} docs")
+
         self.txt_summary.configure(state="normal")
         self.txt_summary.delete("1.0", tk.END)
         self.txt_summary.insert("1.0", "\n".join(lines))
@@ -570,7 +670,7 @@ class App(tk.Tk):
             max_total_candidates=total,
         )
 
-        # Bootstrap + self-learning
+        # Bootstrap and self-learning
         cfg_boot = BootstrapConfig(max_pos_pairs=50_000, max_neg_pairs=50_000)
         try:
             epochs = int(self.entry_sl_epochs.get() or "2")
@@ -589,7 +689,6 @@ class App(tk.Tk):
             persist=True,
         )
 
-    # Apply profile presets
     def _apply_preset(self):
         preset = (self.profile_var.get() or "Balanced").lower()
 
@@ -674,8 +773,10 @@ class App(tk.Tk):
 
     def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
-        self.doc_status.configure(text=f"Ingesting {len(ps)} files…")
-        self.update_idletasks()
+        self.doc_status = getattr(self, "doc_status", None)
+        if self.doc_status:
+            self.doc_status.configure(text=f"Ingesting {len(ps)} files…")
+            self.update_idletasks()
 
         def worker(plist: List[str]):
             ok = 0
@@ -684,12 +785,15 @@ class App(tk.Tk):
                 try:
                     self._ingest_file(p)
                     ok += 1
-                    self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
+                    if self.doc_status:
+                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
                 except Exception:
                     fail += 1
-                    self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
-            self.after(0, lambda: [self._refresh_docs_tab(),
-                                   self.doc_status.configure(text=f"Done. ok={ok}, fail={fail}")])
+                    if self.doc_status:
+                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
+            if self.doc_status:
+                self.after(0, lambda: [self._refresh_docs_tab(),
+                                       self.doc_status.configure(text=f"Done. ok={ok}, fail={fail}")])
 
         threading.Thread(target=worker, args=(ps,), daemon=True).start()
 
@@ -698,7 +802,7 @@ class App(tk.Tk):
         raw_text = data.get("raw_text") or ""
         meta = data.get("metadata") or {}
 
-        # make one document per file-version (path + mtime)
+        # make one document per file-version
         import hashlib, os
         abs_path = os.path.abspath(path)
         try:
@@ -706,10 +810,8 @@ class App(tk.Tk):
         except Exception:
             mtime_ns = 0
 
-        # unique doc id per file version
         doc_id = hashlib.sha1(f"{abs_path}|{mtime_ns}".encode("utf-8", errors="ignore")).hexdigest()
 
-        # normalize
         norm = normalize_text(raw_text)
 
         # write to DB
@@ -725,6 +827,76 @@ class App(tk.Tk):
 
         # file mapping
         sqlite_store.add_file_mapping(doc_id, path, mtime_ns)
+
+    # helpers: counters and timer
+
+    def _reset_counters(self):
+        self.var_cnt_pairs.set("Pairs: —")
+        self.var_cnt_exact.set("Exact-duplicate: —")
+        self.var_cnt_near.set("Near-duplicate: —")
+        self.var_cnt_unc.set("Uncertain: —")
+
+    def _update_counters_from_result(self, res: Dict[str, Any]):
+        rs = res.get("run_summary") or {}
+        pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs')
+        if pairs is not None:
+            self.var_cnt_pairs.set(f"Pairs: {pairs}")
+
+        exact = rs.get('exact_duplicates')
+        near  = rs.get('near_duplicates')
+        if exact is None or near is None:
+            exact = 0 if exact is None else exact
+            near  = 0 if near  is None else near
+            traces = res.get("traces") or []
+            for tr in traces:
+                try:
+                    t = tr.as_dict() if hasattr(tr, "as_dict") else tr
+                    fl = (t.get("final_label") or "").upper()
+                    dk = (t.get("dup_kind") or "").upper()
+                    if fl == "DUPLICATE":
+                        if dk == "EXACT":
+                            exact += 1
+                        else:
+                            near += 1
+                except Exception:
+                    pass
+
+        self.var_cnt_exact.set(f"Exact-duplicate: {exact}")
+        self.var_cnt_near.set(f"Near-duplicate: {near}")
+
+        uc = rs.get('uncertain')
+        if uc is not None:
+            self.var_cnt_unc.set(f"Uncertain: {uc}")
+
+    def _start_timer(self):
+        self._run_start_ts = time.time()
+        self._tick_timer()
+
+    def _stop_timer(self):
+        if self._elapsed_job:
+            try:
+                self.after_cancel(self._elapsed_job)
+            except Exception:
+                pass
+        self._elapsed_job = None
+        if self._run_start_ts is not None:
+            elapsed = int(time.time() - self._run_start_ts)
+            self.var_elapsed.set(self._fmt_hms(elapsed))
+        self._run_start_ts = None
+
+    def _tick_timer(self):
+        if self._run_start_ts is None:
+            return
+        elapsed = int(time.time() - self._run_start_ts)
+        self.var_elapsed.set(self._fmt_hms(elapsed))
+        self._elapsed_job = self.after(1000, self._tick_timer)
+
+    @staticmethod
+    def _fmt_hms(seconds: int) -> str:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def main():
@@ -770,7 +942,7 @@ def import_rows_from_csv(csv_path="dataset/First500.csv"):
         mtime_ns = time.time_ns()
         sqlite_store.add_file_mapping(doc_id, fake_path, mtime_ns)
 
-    print("✅ Imported first 30 CSV rows into database (text column only).")
+    print("✅ Imported first 500 CSV rows into database (text column only).")
 
 # Optional: export all text rows to a single text file for cross checking
 """ 

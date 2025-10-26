@@ -1,7 +1,7 @@
 # src/gui/widgets/metrics_panel.py
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import tkinter as tk
 from tkinter import ttk
@@ -16,9 +16,7 @@ try:
 except Exception:
     _HAVE_MPL = False
 
-# tables tab
 from .metrics_tables import MetricsTables
-
 
 class MetricsPanel(ttk.Frame):
     def __init__(self, master, *args, **kwargs):
@@ -60,15 +58,17 @@ class MetricsPanel(ttk.Frame):
         ttk.Label(self.box_diag, textvariable=self.var_escal).pack(anchor="w", padx=8, pady=(2, 8))
 
         self._last_snapshot = None
+        self._doc_labels: Dict[str, str] = {}
 
     # Public entry
-    def update_metrics(self, run_summary: Dict[str, Any], snapshot: Dict[str, Any]):
+    def update_metrics(self, run_summary: Dict[str, Any], snapshot: Dict[str, Any], *, doc_labels: Optional[Dict[str, str]] = None):
         self._last_snapshot = snapshot
+        self._doc_labels = dict(doc_labels or {})
         self._fill_summary(run_summary)
         self._build_learner_tabs(snapshot)
         self._fill_consensus(snapshot)
         if hasattr(self, "tables_tab"):
-            self.tables_tab.update_tables(snapshot)
+            self.tables_tab.update_tables(snapshot, doc_labels=self._doc_labels)
 
     # private
 
@@ -129,16 +129,11 @@ class MetricsPanel(ttk.Frame):
             body = ttk.Notebook(tab)
             body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-            caltab = ttk.Frame(body)
-            body.add(caltab, text="Calibration")
-            roctab = ttk.Frame(body)
-            body.add(roctab, text="ROC")
-            prtab = ttk.Frame(body)
-            body.add(prtab, text="PR")
-            thrstab = ttk.Frame(body)
-            body.add(thrstab, text="Threshold Sweep")
-            histtab = ttk.Frame(body)
-            body.add(histtab, text="Scores")
+            caltab = ttk.Frame(body); body.add(caltab, text="Calibration")
+            roctab = ttk.Frame(body); body.add(roctab, text="ROC")
+            prtab  = ttk.Frame(body); body.add(prtab, text="PR")
+            thrstab= ttk.Frame(body); body.add(thrstab, text="Threshold Sweep")
+            histtab= ttk.Frame(body); body.add(histtab, text="Scores")
 
             chart = charts.get(name, {}) or {}
             self._plot_calibration(caltab, chart)
@@ -147,8 +142,9 @@ class MetricsPanel(ttk.Frame):
             self._plot_thr_sweep(thrstab, chart)
             self._plot_hist(histtab, chart)
 
+        # Tables tab at the end
         self.nb.add(self.tables_tab, text="Tables")
-        self.tables_tab.update_tables(snapshot)
+        self.tables_tab.update_tables(snapshot, doc_labels=self._doc_labels)
 
     def _fill_consensus(self, snapshot: Dict[str, Any]):
         cons = snapshot.get("consensus", {}) or {}
@@ -178,7 +174,6 @@ class MetricsPanel(ttk.Frame):
             self.var_escal.set(f"Escalations: {rate*100:.1f}%  |  Steps: {steps}")
 
     # plotting helpers
-
     def _clear_children(self, parent: tk.Widget):
         for w in parent.winfo_children():
             try:

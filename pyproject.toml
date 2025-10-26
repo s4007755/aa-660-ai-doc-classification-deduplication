@@ -39,9 +39,15 @@ dependencies = [
     "pillow>=10.0",
     "lxml>=4.9",
 
+    "psutil>=5.9",
+    "pynvml>=11.0 ; platform_system == 'Windows' or platform_system == 'Linux'",
+
     "tqdm>=4.65",
     "requests>=2.31",
 ]
+
+[project.scripts]
+dupfinder = "src.cli_nd:main"
 
 [project.optional-dependencies]
 dev = [
@@ -51,6 +57,9 @@ dev = [
     "mypy>=1.10",
     "httpx>=0.27",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

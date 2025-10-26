@@ -67,6 +67,7 @@ class DecisionTrace:
             "escalation_steps": list(self.escalation_steps),
             "exact_voters": list(self.exact_voters),
             "near_voters": list(self.near_voters),
+            "agreed_learners": list(self.agreed_learners),
             "learners": {},
         }
         def _disp3(x: float) -> float:

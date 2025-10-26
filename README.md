@@ -82,6 +82,102 @@ Workflow inside the app:
 
 5) In Run History, click Open report to view the HTML report
 
+## Quickstart - CLI (headless)
+
+> Short, practical commands for running the pipeline without the GUI.  
+
+> If you installed with `pip install -e .[dev]`, a console script `aa660` may be available. Otherwise, use the module form `python -m src.cli_nd` if your environment exposes it.
+
+**Run the pipeline on a folder and emit a report**
+```bash
+aa660 run --input ./docs --profile balanced --db ./aa660.db --reports ./reports
+# Fallback form (if console script not available):
+python -m src.cli_nd run --input ./docs --profile balanced --db ./aa660.db --reports ./reports
+```
+
+**Generate a fresh HTML report for a past run**
+```bash
+aa660 report --run-id 42 --reports ./reports
+# Fallback:
+python -m src.cli_nd report --run-id 42 --reports ./reports
+```
+
+**List run history**
+```bash
+aa660 history --limit 20
+# Fallback:
+python -m src.cli_nd history --limit 20
+```
+
+**Notes**
+- `--profile` accepts: `balanced`, `high-precision`, `recall-heavy`.
+- `--db` points to (or creates) the SQLite DB file.
+- Reports are written as `reports/run_<RUN_ID>_<TIMESTAMP>.html`.
+- The CLI mirrors the GUI’s defaults; flags are optional in simple cases.
+
+
+### Ingesting documents from an HTTP API (CLI)
+
+You can run the pipeline on docs fetched from a REST endpoint, no files required.
+
+**Basic usage**
+```bash
+# Balanced preset, fetch JSON from an API, write report to ./reports
+python -m src.cli_nd --preset balanced   --api-url "https://api.example.com/my-docs"   --api-headers "{\"Authorization\":\"Bearer YOUR_TOKEN\"}"   --report-dir ./reports
+```
+
+**Accepted response shapes**
+
+Your endpoint must return either:
+
+- A JSON **list** of items, or  
+- A JSON **object** with an `items` list.
+
+Each item may use any of these equivalent keys:
+```json
+[
+  { "doc_id": "A123", "text": "Document text here..." },
+  { "id": "A124",    "text": "Another doc..." },
+  { "doc_id": "A125","raw_text": "Raw content..." }
+]
+```
+
+**Header auth example**
+```bash
+--api-headers "{\"Authorization\":\"Bearer sk_live_...\",\"X-Tenant\":\"acme\"}"
+```
+> The value must be **valid JSON** (double-quoted keys/values). If it isn’t valid, the CLI logs a warning and ignores it.
+
+**Troubleshooting / notes**
+- Provide **at least 2 items**; otherwise the run will exit early.
+- For offline runs with a saved payload, you can also point to a file:
+  ```bash
+  python -m src.cli_nd --preset balanced --json-file ./my_docs.json --report-dir ./reports
+  ```
+- Reports are written to `--report-dir` as `run_<RUN_ID>_<TIMESTAMP>.html`.
+
+
+## Profiles
+
+- **Balanced** – Good overall trade‑off.  
+- **High Precision** – Stricter thresholds, fewer false positives.  
+- **Recall‑Heavy** – More aggressive duplicate finding (expect more uncertain/escalations).
+
+> You can tune the gray‑zone margin, escalation steps and self‑train epochs in the *Main* tab before running.
+
+
+## Reports (what you'll see)
+- **Run summary**: total pairs, duplicates (exact/near), uncertain, consensus %, escalations %  
+- **Per‑learner snapshot**: N, positive rate, AUC, Brier, threshold  
+- **Calibration snapshot**: method, threshold, Brier, reliability points  
+- **Charts** per learner: reliability, ROC, PR, threshold sweep, score histogram  
+- **Examples**: easy positives, escalated/hard, uncertain  
+- **Clusters**: groups of documents connected by duplicate decisions  
+- **Config**: full JSON snapshot for reproducibility
+
+Open via Run History -> Open report or by calling `generate_report(...)`.
+
+
 ## Windows: run the packaged EXE
 
 - Double click AA660-DocAI.exe, or

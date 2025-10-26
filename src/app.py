@@ -10,6 +10,14 @@ from typing import Any, Dict, List, Optional, Iterable
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+# NEW: resource monitoring deps
+import psutil  # pip install psutil
+try:
+    import pynvml  # pip install pynvml (optional)
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
+
 # Storage and pipeline
 from src.storage import sqlite_store
 from src.persistence import state_store
@@ -95,6 +103,10 @@ class App(tk.Tk):
         # timer state
         self._elapsed_job: Optional[str] = None
         self._run_start_ts: Optional[float] = None
+
+        # NEW: resource monitor state
+        self._res_job: Optional[str] = None
+        self._proc = psutil.Process(os.getpid())
 
         self._build_ui()
         self._refresh_docs_from_db()
@@ -278,6 +290,35 @@ class App(tk.Tk):
         self.txt_summary.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.txt_summary.configure(state="disabled")
 
+        # Resource usage (toggle and panel)
+        res_toggle_row = ttk.Frame(status)
+        res_toggle_row.pack(fill=tk.X, padx=8, pady=(4, 0))
+        self.var_show_res = tk.BooleanVar(value=True)
+        self.btn_toggle_res = ttk.Checkbutton(
+            res_toggle_row,
+            text="Resource usage ▾",
+            variable=self.var_show_res,
+            command=self._toggle_resource_section,
+            style="Toolbutton",
+        )
+        self.btn_toggle_res.pack(side=tk.LEFT)
+
+        self.res_container = ttk.LabelFrame(status, text="Resource usage")
+
+        self.var_res_cpu = tk.StringVar(value="")
+        self.var_res_mem = tk.StringVar(value="")
+        self.var_res_io  = tk.StringVar(value="")
+        self.var_res_gpu = tk.StringVar(value="")
+
+        ttk.Label(self.res_container, textvariable=self.var_res_cpu).pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Label(self.res_container, textvariable=self.var_res_mem).pack(anchor="w", padx=8, pady=(2, 0))
+        ttk.Label(self.res_container, textvariable=self.var_res_io).pack(anchor="w", padx=8, pady=(2, 6))
+        if _NVML_OK:
+            ttk.Label(self.res_container, textvariable=self.var_res_gpu).pack(anchor="w", padx=8, pady=(0, 8))
+
+        # show by default
+        self.res_container.pack(fill=tk.X, padx=8, pady=(0, 8))
+
     def _toggle_advanced_section(self):
         show = bool(self.var_show_adv.get())
         self.btn_toggle_adv.configure(text="Advanced settings ▾" if show else "Advanced settings ▸")
@@ -286,6 +327,18 @@ class App(tk.Tk):
                 self.adv_container.pack(fill=tk.X, padx=4, pady=(0, 8))
             else:
                 self.adv_container.pack_forget()
+        except Exception:
+            pass
+
+    # toggle for resource usage panel
+    def _toggle_resource_section(self):
+        show = bool(self.var_show_res.get())
+        self.btn_toggle_res.configure(text="Resource usage ▾" if show else "Resource usage ▸")
+        try:
+            if show:
+                self.res_container.pack(fill=tk.X, padx=8, pady=(0, 8), after=self.txt_summary)
+            else:
+                self.res_container.pack_forget()
         except Exception:
             pass
 
@@ -421,6 +474,8 @@ class App(tk.Tk):
         self.var_status.set("Starting…")
         self._reset_counters()
         self._start_timer()
+        # start resource monitor
+        self._start_resource_monitor()
 
         def worker():
             err = None
@@ -450,6 +505,8 @@ class App(tk.Tk):
         self.running = False
         self.btn_run.configure(state=tk.NORMAL)
         self._stop_timer()
+        # stop resource monitor
+        self._stop_resource_monitor()
 
         if err is not None:
             self.var_status.set("Error")
@@ -485,7 +542,7 @@ class App(tk.Tk):
             "consensus": raw_snap.get("consensus", {}),
             "escalations": raw_snap.get("escalations", {}),
         }
-        self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm)
+        self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm, doc_labels=self._doc_labels_from_db())
 
         # push numbers into learner cards header KPIs
         thresholds = self._thresholds_from_result(self.pipeline_result)
@@ -861,6 +918,98 @@ class App(tk.Tk):
         m = (seconds % 3600) // 60
         s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+    # Resource monitor
+    def _start_resource_monitor(self):
+        try:
+            psutil.cpu_percent(interval=None)
+            self._proc.cpu_percent(interval=None)
+        except Exception:
+            pass
+        self._poll_resources()
+
+    def _stop_resource_monitor(self):
+        if self._res_job:
+            try:
+                self.after_cancel(self._res_job)
+            except Exception:
+                pass
+        self._res_job = None
+
+    @staticmethod
+    def _fmt_bytes(n: int) -> str:
+        try:
+            n = float(n)
+        except Exception:
+            return f"{n}"
+        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+            if n < 1024 or unit == "TiB":
+                return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} {unit}"
+            n /= 1024.0
+
+    def _gpu_summary_text(self) -> Optional[str]:
+        if not _NVML_OK:
+            return None
+        try:
+            pynvml.nvmlInit()
+            cnt = pynvml.nvmlDeviceGetCount()
+            if cnt == 0:
+                pynvml.nvmlShutdown()
+                return None
+            parts = []
+            for i in range(cnt):
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                used = mem.used / (1024**3)
+                total = mem.total / (1024**3)
+                try:
+                    name = pynvml.nvmlDeviceGetName(h).decode("utf-8", errors="ignore")
+                except Exception:
+                    name = f"GPU{i}"
+                parts.append(f"{name}: {util.gpu}% · VRAM {used:.1f}/{total:.1f} GiB")
+            pynvml.nvmlShutdown()
+            return " | ".join(parts) if parts else None
+        except Exception:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+            return None
+
+    def _poll_resources(self):
+        try:
+            with self._proc.oneshot():
+                # psutil returns process CPU % on a single core scale
+                raw_proc = self._proc.cpu_percent(interval=None)
+                cores = psutil.cpu_count(logical=True) or 1
+                norm = raw_proc / float(cores)  # normalize
+
+                mem_info = self._proc.memory_full_info()
+                rss = mem_info.rss
+                total_ram = psutil.virtual_memory().total
+                mem_percent = (rss / total_ram * 100.0) if total_ram else 0.0
+
+                open_files_cnt = len(self._proc.open_files())
+                threads_cnt = self._proc.num_threads()
+
+            # Update labels
+            self.var_res_cpu.set(f"App CPU: {norm:.1f}% of system  (raw {raw_proc:.1f}%)")
+            self.var_res_mem.set(f"App RAM: {self._fmt_bytes(rss)}  ({mem_percent:.1f}%)")
+            self.var_res_io.set(f"Open files: {open_files_cnt}   Threads: {threads_cnt}")
+
+            # GPU only if available
+            if _NVML_OK:
+                gtxt = self._gpu_summary_text()
+                if gtxt:
+                    self.var_res_gpu.set(f"GPU: {gtxt}")
+                else:
+                    self.var_res_gpu.set("")
+
+        except Exception:
+            pass
+        finally:
+            self._res_job = self.after(1000, self._poll_resources)
 
 
 def main():

@@ -330,6 +330,8 @@ class RunHistory(ttk.Frame):
             path = None
 
         if path and os.path.exists(path):
+            if "report_path" in self._sum_labels:
+                self._sum_labels["report_path"].configure(text=os.path.basename(path))
             self._open_path(path)
             return
 
@@ -342,11 +344,14 @@ class RunHistory(ttk.Frame):
                 except Exception:
                     pass
             if path and os.path.exists(path):
+                if "report_path" in self._sum_labels:
+                    self._sum_labels["report_path"].configure(text=os.path.basename(path))
                 self._open_path(path)
                 return
         except Exception as e:
             messagebox.showerror("Open report", f"Failed to generate/open report:\n{e}")
             return
+
 
     def _export_config(self):
         run = self._selected_run_details()
@@ -491,7 +496,7 @@ class RunHistory(ttk.Frame):
             elif fl == "UNCERTAIN":
                 unc += 1
 
-        # Snapshot-derived metrics
+        # Snapshot derived metrics
         if metrics_snapshot is not None:
             try:
                 snap = metrics_snapshot(_as_traces_for_snapshot(traces_json), pseudo_labels={})
@@ -570,7 +575,7 @@ class RunHistory(ttk.Frame):
             return None
 
 
-# Helper: adapt traces for metrics_snapshot without importing the full class
+# Helper: adapt traces for metrics_snapshot
 def _as_traces_for_snapshot(traces_json: List[Dict[str, Any]]):
     from types import SimpleNamespace
     out = []

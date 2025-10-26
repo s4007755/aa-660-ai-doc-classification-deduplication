@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import re
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -81,7 +83,7 @@ def _simhash_from_tokens(tokens: List[str], max_weight: int, bits: int) -> int:
         counts = Counter(tokens)
         feats = [(t, min(c, max_weight)) for t, c in counts.items()]
         return int(Simhash(feats, f=bits).value)
-    v = [0] * bits
+    """v = [0] * bits
     mask = (1 << bits) - 1
     for t in tokens:
         h = hash(t) & mask
@@ -91,6 +93,14 @@ def _simhash_from_tokens(tokens: List[str], max_weight: int, bits: int) -> int:
     for i in range(bits):
         if v[i] >= 0:
             x |= (1 << i)
+    """
+    v = np.zeros(bits, dtype=int)
+    hashes = np.array([hash(t) & ((1 << bits) - 1) for t in tokens], dtype=np.uint64)
+    for i in range(bits):
+        v[i] = np.sum((hashes >> i) & 1) * 2 - len(tokens)  # +1/-1 logic
+    x = np.packbits(v >= 0)[0]  # simplified conversion back to int (needs care for >64 bits)
+
+        
     return int(x)
 
 # Internal state
@@ -222,35 +232,81 @@ class SimHashLearner(ILearner):
             internals=None,
         )
 
-    def batch_score(self, pairs: Iterable[Pair]) -> List[LearnerOutput]:
+    # inside SimHashLearner class
+
+    def _score_one(
+        self,
+        a: DocumentView,
+        b: DocumentView,
+        edges: Optional[np.ndarray],
+        probs: Optional[np.ndarray],
+        bits: int
+    ) -> LearnerOutput:
+        """Compute similarity and calibrated probability for a single pair."""
+        h1 = self._hash(a)
+        h2 = self._hash(b)
+        hd = _hamming(h1, h2, bits)
+        sim = max(0.0, 1.0 - hd / float(bits))
+        prob = apply_binning_or_platt(sim, self._state.calibration, edges, probs)
+        th = self._state.calibration.threshold
+
+        extras = self._config.extras or {}
+        # Show top overlapping tokens
+        ov = list((Counter(_tokenize(a.text or "", 2, self._stopwords, False, False)) &
+                Counter(_tokenize(b.text or "", 2, self._stopwords, False, False))).elements())
+        top_shared = [t for t, _ in Counter(ov).most_common(5)]
+
+        rationale = {
+            "mode": (extras.get("simhash_mode") or "unigram"),
+            "hash_bits": bits,
+            "hamming_distance": int(hd),
+            "similarity_est": float(sim),
+            "top_stable_tokens": top_shared,
+            "threshold_used": None if th is None else float(th),
+        }
+
+        return LearnerOutput(
+            raw_score=float(sim),
+            prob=float(min(prob, 1.0 - 1e-9)),
+            threshold=th,
+            rationale=rationale,
+            warnings=[],
+            internals=None,
+        )
+
+
+    def batch_score(
+        self,
+        pairs: Iterable[Pair],
+        use_parallel: bool = True,
+        max_workers: int = os.cpu_count() or 4
+    ) -> List[LearnerOutput]:
+        pairs_list = list(pairs)
+        if not pairs_list:
+            return []
+
         extras = self._config.extras or {}
         bits = int(extras.get("hash_bits", 128))
         edges, probs = self._istate.edges, self._istate.probs
-        th = self._state.calibration.threshold
+
+        # Sequential fallback for few pairs or disabled parallel
+        if not use_parallel or len(pairs_list) < 4:
+            return [self._score_one(a, b, edges, probs, bits) for a, b in pairs_list]
+
+        # Parallel execution (CPU-bound => ProcessPoolExecutor)
         outs: List[LearnerOutput] = []
-        cache: Dict[str, int] = {}
-        for a, b in pairs:
-            h1 = cache.get(a.doc_id)
-            if h1 is None:
-                h1 = cache[a.doc_id] = self._hash(a)
-            h2 = cache.get(b.doc_id)
-            if h2 is None:
-                h2 = cache[b.doc_id] = self._hash(b)
-            hd = _hamming(h1, h2, bits)
-            sim = max(0.0, 1.0 - hd / float(bits))
-            prob = apply_binning_or_platt(sim, self._state.calibration, edges, probs)
-            outs.append(LearnerOutput(
-                raw_score=float(sim),
-                prob=float(min(prob, 1.0 - 1e-9)),
-                threshold=th,
-                rationale={
-                    "mode": (extras.get("simhash_mode") or "unigram"),
-                    "hash_bits": bits,
-                    "hamming_distance": int(hd),
-                    "similarity_est": float(sim),
-                    "threshold_used": None if th is None else float(th),
-                }
-            ))
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._score_one, a, b, edges, probs, bits): (a, b)
+                for a, b in pairs_list
+            }
+            for future in as_completed(futures):
+                try:
+                    outs.append(future.result())
+                except Exception as e:
+                    a, b = futures[future]
+                    print(f"[!] Error scoring pair {a.doc_id} / {b.doc_id}: {e}")
+
         return outs
 
     # training
@@ -302,6 +358,7 @@ class SimHashLearner(ILearner):
             "pos_bucket": int(extras.get("pos_bucket", 0) or 0),
         }
         return self._state
+
 
     def self_train(self, pseudo_labels: Iterable[PairLabel]) -> LearnerState:
         return self._state

@@ -771,7 +771,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Delete failed", str(e))
 
-    def _ingest_paths(self, paths: Iterable[str]):
+    """def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
         self.doc_status = getattr(self, "doc_status", None)
         if self.doc_status:
@@ -827,6 +827,82 @@ class App(tk.Tk):
 
         # file mapping
         sqlite_store.add_file_mapping(doc_id, path, mtime_ns)
+    """
+
+    def _ingest_paths(self, paths: Iterable[str]):
+        ps = list(paths)
+        if self.doc_status:
+            self.doc_status.configure(text=f"Ingesting {len(ps)} files…")
+            self.update_idletasks()
+
+        def worker(plist: List[str]):
+            docs_batch = []
+            mappings_batch = []
+            ok = 0
+            fail = 0
+
+            for p in plist:
+                try:
+                    doc_entry, mapping_entry = self._ingest_file(p, return_batch=True)
+                    if doc_entry and mapping_entry:
+                        docs_batch.append(doc_entry)
+                        mappings_batch.append(mapping_entry)
+                    ok += 1
+                    if self.doc_status:
+                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
+                except Exception:
+                    fail += 1
+                    if self.doc_status:
+                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
+
+            # Batch insert at the end
+            if docs_batch:
+                sqlite_store.batch_upsert_documents(docs_batch)
+            if mappings_batch:
+                sqlite_store.batch_add_file_mappings(mappings_batch)
+
+            if self.doc_status:
+                self.after(0, lambda: [self._refresh_docs_tab(),
+                                    self.doc_status.configure(text=f"Done. ok={ok}, fail={fail}")])
+
+        threading.Thread(target=worker, args=(ps,), daemon=True).start()
+
+
+    def _ingest_file(self, path: str, return_batch: bool = False):
+        data = _ingestion_mod.extract_document(path)
+        raw_text = data.get("raw_text") or ""
+        meta = data.get("metadata") or {}
+
+        abs_path = os.path.abspath(path)
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except Exception:
+            mtime_ns = 0
+
+        doc_id = hashlib.sha1(f"{abs_path}|{mtime_ns}".encode("utf-8", errors="ignore")).hexdigest()
+        norm = normalize_text(raw_text)
+
+        if return_batch:
+            # Return tuples for batch insertion
+            doc_entry = (doc_id, raw_text, norm, str({
+                "language": meta.get("language"),
+                "filesize": meta.get("filesize") or 0
+            }))
+            mapping_entry = (doc_id, abs_path, mtime_ns)
+            return doc_entry, mapping_entry
+
+        # legacy behavior: single insert
+        sqlite_store.upsert_document(
+            doc_id=doc_id,
+            raw_text=raw_text,
+            normalized_text=norm,
+            meta={
+                "language": meta.get("language"),
+                "filesize": meta.get("filesize") or 0,
+            },
+        )
+        sqlite_store.add_file_mapping(doc_id, abs_path, mtime_ns)
+
 
     # helpers: counters and timer
 
@@ -903,9 +979,9 @@ def main():
     App().mainloop()
 
 # import first 500 rows from a CSV file with text column field only, can be modified to try higher number of rows
-def import_rows_from_csv(csv_path="dataset/First500.csv"):
+def import_rows_from_csv(csv_path="dataset/True.csv"):
     try:
-        df = pd.read_csv(csv_path, nrows=500)
+        df = pd.read_csv(csv_path)
     except Exception as e:
         print(f"Error reading CSV: {e}")
         return
@@ -915,15 +991,26 @@ def import_rows_from_csv(csv_path="dataset/First500.csv"):
         print(f"Found columns: {df.columns.tolist()}")
         return
 
+    # 1️⃣ Sample 1500 random rows
+    if len(df) < 1500:
+        print(f"⚠️ CSV has only {len(df)} rows, sampling all available.")
+        sampled_df = df.copy()
+    else:
+        sampled_df = df.sample(n=1500, random_state=random.randint(0, 9999))
+
+    # 2️⃣ Duplicate 500 random rows from those 1500
+    duplicates = sampled_df.sample(n=500, replace=False, random_state=random.randint(0, 9999))
+    combined_df = pd.concat([sampled_df, duplicates], ignore_index=True).sample(frac=1).reset_index(drop=True)
+
     sqlite_store.init_db()  # ensure DB schema exists
 
-    for i, row in df.iterrows():
-        text = str(row["text"]) if pd.notna(row.get("text", "")) else ""
-        if not text.strip():
+    fake_path = os.path.abspath(csv_path)
+    for i, row in combined_df.iterrows():
+        text = str(row.get("text", "")).strip()
+        if not text:
             continue
 
         doc_id = hashlib.sha1(f"csv_row_{i}_{time.time_ns()}".encode()).hexdigest()
-        
         norm = normalize_text(text)
 
         meta = {
@@ -938,42 +1025,13 @@ def import_rows_from_csv(csv_path="dataset/First500.csv"):
             meta=meta,
         )
 
-        fake_path = os.path.abspath(csv_path)
         mtime_ns = time.time_ns()
         sqlite_store.add_file_mapping(doc_id, fake_path, mtime_ns)
 
-    print("✅ Imported first 500 CSV rows into database (text column only).")
+    print("✅ Imported 2000 CSV rows into database.")
 
-# Optional: export all text rows to a single text file for cross checking
-""" 
-def export_csv_text_to_single_file(csv_path="dataset/First500.csv", output_filename="all_text_rows.txt"):
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        print(f"❌ Error reading CSV: {e}")
-        return
-
-    if "text" not in df.columns:
-        print(f"❌ CSV must have a 'text' column. Found: {df.columns.tolist()}")
-        return
-
-    # Build output path (data/raw relative to src/)
-    out_dir = Path(__file__).resolve().parent.parent / "data" / "raw"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / output_filename
-
-    with open(out_file, "w", encoding="utf-8") as f:
-        for i, row in df.iterrows():
-            text = str(row["text"]) if pd.notna(row.get("text", "")) else ""
-            if not text.strip():
-                continue
-            # Sequentially numbered, indented for readability
-            f.write(f"{i + 1}. {text.strip()}\n\n")
-
-    print(f"✅ Exported {len(df)} rows to {out_file}")
-    """
 
 if __name__ == "__main__":
-    import_rows_from_csv() # Comment out as needed to test
-    # export_csv_text_to_single_file()
+    # Comment out the below function as needed to insert more data from CSV
+    # import_rows_from_csv() 
     main()

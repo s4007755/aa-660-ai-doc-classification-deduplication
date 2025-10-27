@@ -860,7 +860,6 @@ class App(tk.Tk):
             messagebox.showerror("Delete failed", str(e))
 
     """def _ingest_paths(self, paths: Iterable[str]):
-    """def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
         self.doc_status = getattr(self, "doc_status", None)
         if self.doc_status:
@@ -917,6 +916,7 @@ class App(tk.Tk):
         # file mapping
         sqlite_store.add_file_mapping(doc_id, path, mtime_ns)
 """
+
     def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
         if self.doc_status:

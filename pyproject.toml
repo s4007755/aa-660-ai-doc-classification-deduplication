@@ -20,10 +20,11 @@ dependencies = [
 
     "simhash>=2.1.2",
     "datasketch>=1.6.5",
-
+    "faiss-cpu>=1.7,<2",
     "sentence-transformers>=2.6",
     "transformers>=4.40",
     "torch>=2.2",
+
     "langdetect>=1.0.9",
 
     "fastapi>=0.111",

@@ -97,25 +97,86 @@ def upsert_document(doc_id: str, raw_text: str, normalized_text: str, meta: Dict
     conn.close()
 
 # HERE IS THE ADDED 2 FUNCTIONS TO HELP WITH BATCH PROCESSING
-def batch_upsert_documents(docs: list[tuple[str, str, str, str]]):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.executemany(
-        "INSERT OR REPLACE INTO documents (doc_id, raw_text, normalized_text, meta) VALUES (?, ?, ?, ?)",
-        docs
+from typing import Iterable, Sequence, Union
+
+def batch_upsert_documents(
+    docs: Iterable[Sequence[Union[str, int, dict]]]
+):
+    """
+    Accepts items shaped like:
+      (doc_id, raw_text, normalized_text)
+      (doc_id, raw_text, normalized_text, language)
+      (doc_id, raw_text, normalized_text, filesize)
+      (doc_id, raw_text, normalized_text, meta_dict)  # meta may contain language/filesize
+      (doc_id, raw_text, normalized_text, language, filesize)
+    Normalizes to 5-tuple: (doc_id, raw_text, normalized_text, language, filesize)
+    """
+    normalized: List[Tuple[str, str, str, Optional[str], Optional[int]]] = []
+
+    for item in docs:
+        if not item:
+            continue
+        # unpack safely
+        if len(item) == 3:
+            doc_id, raw_text, normalized_text = item
+            language, filesize = None, None
+        elif len(item) == 4:
+            doc_id, raw_text, normalized_text, fourth = item
+            language, filesize = None, None
+            if isinstance(fourth, dict):
+                language = fourth.get("language")
+                filesize = fourth.get("filesize", 0)
+            elif isinstance(fourth, str):
+                language = fourth
+            elif isinstance(fourth, int):
+                filesize = fourth
+            else:
+                # unknown type -> leave as None
+                pass
+        else:
+            # 5 or more: take first five in order
+            doc_id, raw_text, normalized_text, language, filesize = item[:5]
+
+        normalized.append((doc_id, raw_text, normalized_text, language, filesize))
+
+    if not normalized:
+        return
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.executemany(
+        """
+        INSERT INTO documents (doc_id, raw_text, normalized_text, language, filesize, is_dirty, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+        ON CONFLICT(doc_id) DO UPDATE SET
+            raw_text=excluded.raw_text,
+            normalized_text=excluded.normalized_text,
+            language=excluded.language,
+            filesize=excluded.filesize,
+            is_dirty=0,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        normalized,
     )
     conn.commit()
     conn.close()
 
-def batch_add_file_mappings(mappings: list[tuple[str, str, int]]):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.executemany(
-        "INSERT OR REPLACE INTO file_mappings (doc_id, filepath, mtime_ns) VALUES (?, ?, ?)",
-        mappings
+
+def batch_add_file_mappings(mappings: List[Tuple[str, str, Optional[int]]]):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.executemany(
+        """
+        INSERT INTO document_files (doc_id, filepath, mtime_ns)
+        VALUES (?, ?, ?)
+        ON CONFLICT(doc_id, filepath) DO UPDATE SET
+            mtime_ns=excluded.mtime_ns
+        """,
+        mappings,
     )
     conn.commit()
     conn.close()
+
 
 
 def add_file_mapping(doc_id: str, filepath: str, mtime_ns: Optional[int]):

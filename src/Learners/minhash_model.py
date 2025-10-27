@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -155,32 +157,85 @@ class MinHashLearner(ILearner):
             internals=None,
         )
 
-    def batch_score(self, pairs: Iterable[Pair]) -> List[LearnerOutput]:
-        th = self._state.calibration.threshold
-        edges, probs = self._istate.edges, self._istate.probs
 
+    def _score_one(
+        self,
+        a: DocumentView,
+        b: DocumentView,
+        edges: Optional[np.ndarray],
+        probs: Optional[np.ndarray],
+        use_minhash: bool,
+        cache_shingles: Dict[str, List[str]],
+        cache_minhash: Dict[str, Any],
+        num_perm: int,
+    ) -> LearnerOutput:
+        """Compute score and probability for a single pair."""
+        if use_minhash:
+            jaccard = self._jaccard_minhash(a, b, cache_shingles, cache_minhash, num_perm)
+        else:
+            sh_a = self._get_shingles_cached(a, cache_shingles)
+            sh_b = self._get_shingles_cached(b, cache_shingles)
+            jaccard = _jaccard_from_sets(sh_a, sh_b)
+
+        prob = apply_binning_or_platt(jaccard, self._state.calibration, edges, probs)
+        warns: List[str] = []
+        if not self._get_shingles_cached(a, cache_shingles) and not self._get_shingles_cached(b, cache_shingles):
+            warns.append("Both sides produced no shingles after preprocessing")
+
+        rationale = {
+            "jaccard": float(jaccard),
+            "threshold_used": None if self._state.calibration.threshold is None else float(self._state.calibration.threshold),
+        }
+
+        return LearnerOutput(
+            raw_score=float(jaccard),
+            prob=float(min(prob, 1.0 - 1e-9)),
+            threshold=self._state.calibration.threshold,
+            rationale=rationale,
+            warnings=warns,
+        )
+
+
+    def batch_score(
+        self,
+        pairs: Iterable[Pair],
+        use_parallel: bool = True,
+        max_workers: int = os.cpu_count() or 4
+    ) -> List[LearnerOutput]:
+        """Compute scores for multiple pairs, optionally in parallel."""
+        pairs_list = list(pairs)
+        if not pairs_list:
+            return []
+
+        edges, probs = self._istate.edges, self._istate.probs
+        use_minhash = bool(self._config.extras.get("use_minhash", True) and MinHash is not None)
+        num_perm = int(self._config.extras.get("num_perm", 64))
         cache_shingles: Dict[str, List[str]] = {}
         cache_minhash: Dict[str, Any] = {}
 
-        use_minhash = bool(self._config.extras.get("use_minhash", True) and MinHash is not None)
-        num_perm = int(self._config.extras.get("num_perm", 64))
+        # Sequential fallback
+        if not use_parallel or len(pairs_list) < 4:
+            return [
+                self._score_one(a, b, edges, probs, use_minhash, cache_shingles, cache_minhash, num_perm)
+                for a, b in pairs_list
+            ]
 
+        # Parallel execution
         outs: List[LearnerOutput] = []
-        for a, b in pairs:
-            if use_minhash:
-                jaccard = self._jaccard_minhash(a, b, cache_shingles, cache_minhash, num_perm)
-            else:
-                sh_a = self._get_shingles_cached(a, cache_shingles)
-                sh_b = self._get_shingles_cached(b, cache_shingles)
-                jaccard = _jaccard_from_sets(sh_a, sh_b)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._score_one, a, b, edges, probs, use_minhash, cache_shingles, cache_minhash, num_perm): (a, b)
+                for a, b in pairs_list
+            }
+            for future in as_completed(futures):
+                try:
+                    outs.append(future.result())
+                except Exception as e:
+                    a, b = futures[future]
+                    print(f"[!] Error scoring pair {a.doc_id}/{b.doc_id}: {e}")
 
-            prob = apply_binning_or_platt(jaccard, self._state.calibration, edges, probs)
-            warns = []
-            if not self._get_shingles_cached(a, cache_shingles) and not self._get_shingles_cached(b, cache_shingles):
-                warns.append("Both sides produced no shingles after preprocessing")
-            rationale = {"jaccard": float(jaccard), "threshold_used": None if th is None else float(th)}
-            outs.append(LearnerOutput(raw_score=float(jaccard), prob=float(min(prob, 1.0 - 1e-9)), threshold=th, rationale=rationale, warnings=warns))
         return outs
+
 
     # training
 
@@ -189,9 +244,25 @@ class MinHashLearner(ILearner):
         neg_pairs = list(negatives)
         if not pos_pairs and not neg_pairs:
             return self._state
+        
+        # Precompute unique docs
+        all_pairs = pos_pairs + neg_pairs
+        unique_docs = {d.doc_id: d for a, b in all_pairs for d in (a, b)}
+        shingles_map = {doc_id: self._get_shingles(d) for doc_id, d in unique_docs.items()}
 
-        pos_scores = np.array([self._raw_score(a, b) for a, b in pos_pairs], dtype=np.float32)
-        neg_scores = np.array([self._raw_score(a, b) for a, b in neg_pairs], dtype=np.float32)
+        # Vectorized Jaccard for all pairs
+        def jaccard_from_ids(a: DocumentView, b: DocumentView) -> float:
+            sa, sb = set(shingles_map[a.doc_id]), set(shingles_map[b.doc_id])
+            inter = len(sa & sb)
+            union = len(sa | sb)
+            return 0.0 if union == 0 else float(inter) / union
+
+        scores = np.array([jaccard_from_ids(a, b) for a, b in all_pairs], dtype=np.float32)
+
+        # Split pos/neg scores
+        pos_scores = scores[:len(pos_pairs)]
+        neg_scores = scores[len(pos_pairs):]
+
         scores = np.concatenate([pos_scores, neg_scores], axis=0)
         labels = np.concatenate([np.ones_like(pos_scores), np.zeros_like(neg_scores)], axis=0)
 

@@ -96,6 +96,27 @@ def upsert_document(doc_id: str, raw_text: str, normalized_text: str, meta: Dict
     conn.commit()
     conn.close()
 
+# HERE IS THE ADDED 2 FUNCTIONS TO HELP WITH BATCH PROCESSING
+def batch_upsert_documents(docs: list[tuple[str, str, str, str]]):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.executemany(
+        "INSERT OR REPLACE INTO documents (doc_id, raw_text, normalized_text, meta) VALUES (?, ?, ?, ?)",
+        docs
+    )
+    conn.commit()
+    conn.close()
+
+def batch_add_file_mappings(mappings: list[tuple[str, str, int]]):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.executemany(
+        "INSERT OR REPLACE INTO file_mappings (doc_id, filepath, mtime_ns) VALUES (?, ?, ?)",
+        mappings
+    )
+    conn.commit()
+    conn.close()
+
 
 def add_file_mapping(doc_id: str, filepath: str, mtime_ns: Optional[int]):
     # Map a file path to a document

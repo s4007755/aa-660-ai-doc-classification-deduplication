@@ -860,7 +860,6 @@ class App(tk.Tk):
             messagebox.showerror("Delete failed", str(e))
 
     """def _ingest_paths(self, paths: Iterable[str]):
-    """def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
         self.doc_status = getattr(self, "doc_status", None)
         if self.doc_status:

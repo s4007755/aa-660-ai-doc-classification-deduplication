@@ -8,8 +8,8 @@ import numpy as np
 
 from src.ensemble.arbiter import DecisionTrace
 
-# Public API
 
+# Public, top-level helpers
 def summarize_run(traces: Iterable[DecisionTrace]) -> Dict[str, Any]:
     t = list(traces)
     total = len(t)
@@ -151,9 +151,6 @@ def metrics_snapshot(
     *,
     reliability_bins: int = 10,
 ) -> Dict[str, Any]:
-    """
-    Rich snapshot for the Metrics tab.
-    """
     t = list(traces)
     run = summarize_run(t)
     per_learner = per_learner_from_pseudo(t, pseudo_labels, reliability_bins=reliability_bins)
@@ -164,8 +161,8 @@ def metrics_snapshot(
     consensus = _consensus_report(t)
     escalations = _escalation_report(t)
 
-    # confusion and curated examples
-    confusion, examples = _confusion_and_examples(t)
+    # curated examples
+    confusion, examples = _tp_tn_examples_only(t)
 
     return {
         "run": run,
@@ -179,8 +176,8 @@ def metrics_snapshot(
         "examples": examples,
     }
 
-# Internals: reports
 
+# Internals: reports
 def _threshold_report(traces: List[DecisionTrace]) -> Dict[str, Any]:
     pseudo: Dict[str, int] = {}
     for tr in traces:
@@ -276,10 +273,9 @@ def _escalation_report(traces: List[DecisionTrace]) -> Dict[str, Any]:
     }
 
 
-def _confusion_and_examples(traces: List[DecisionTrace]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
-    confusion: Dict[str, Dict[str, Any]] = {}
-    false_pos: List[Dict[str, Any]] = []
-    false_neg: List[Dict[str, Any]] = []
+def _tp_tn_examples_only(traces: List[DecisionTrace]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+    true_pos: List[Dict[str, Any]] = []
+    true_neg: List[Dict[str, Any]] = []
 
     for tr in traces:
         if tr.final_label not in ("DUPLICATE", "NON_DUPLICATE"):
@@ -291,43 +287,19 @@ def _confusion_and_examples(traces: List[DecisionTrace]) -> Tuple[Dict[str, Dict
             if th is None or np.isnan(lo.prob):
                 continue
             pred = 1 if float(lo.prob) >= float(th) else 0
-            entry = confusion.setdefault(learner, {"tp": 0, "fp": 0, "tn": 0, "fn": 0})
+            row = {
+                "learner": learner, "pair_key": tr.pair_key,
+                "a_id": tr.a_id, "b_id": tr.b_id,
+                "prob": float(lo.prob), "threshold": float(th),
+            }
             if pred == 1 and y == 1:
-                entry["tp"] += 1
-            elif pred == 1 and y == 0:
-                entry["fp"] += 1
-                false_pos.append({
-                    "learner": learner, "pair_key": tr.pair_key,
-                    "a_id": tr.a_id, "b_id": tr.b_id,
-                    "prob": float(lo.prob), "threshold": float(th),
-                })
+                true_pos.append(row)
             elif pred == 0 and y == 0:
-                entry["tn"] += 1
-            elif pred == 0 and y == 1:
-                entry["fn"] += 1
-                false_neg.append({
-                    "learner": learner, "pair_key": tr.pair_key,
-                    "a_id": tr.a_id, "b_id": tr.b_id,
-                    "prob": float(lo.prob), "threshold": float(th),
-                })
+                true_neg.append(row)
 
-    # derive PR, RC, F1
-    for learner, e in confusion.items():
-        tp = float(e["tp"]); fp = float(e["fp"]); fn = float(e["fn"])
-        prec = tp / (tp + fp) if (tp + fp) > 0 else None
-        rec  = tp / (tp + fn) if (tp + fn) > 0 else None
-        f1 = (2 * prec * rec / (prec + rec)) if prec is not None and rec is not None and (prec + rec) > 0 else None
-        e["precision"] = None if prec is None else float(prec)
-        e["recall"] = None if rec is None else float(rec)
-        e["f1"] = None if f1 is None else float(f1)
-
-    # curate examples
-    false_pos.sort(key=lambda r: (-float(r["prob"]), r["pair_key"]))
-    false_neg.sort(key=lambda r: (float(r["prob"]), r["pair_key"]))
-    fp_show = false_pos[:50]
-    fn_show = false_neg[:50]
-
-    return confusion, {"false_positives": fp_show, "false_negatives": fn_show}
+    true_pos.sort(key=lambda r: (-float(r["prob"]), r["pair_key"]))
+    true_neg.sort(key=lambda r: (float(r["prob"]), r["pair_key"]))
+    return {}, {"true_positives": true_pos[:50], "true_negatives": true_neg[:50]}
 
 
 def _chart_payloads_per_learner(
@@ -389,20 +361,23 @@ def _chart_payloads_per_learner(
         }
     return charts
 
-# Internals: math helpers
 
+# Internals: math bits
 def _safe_mean(xs: List[float]) -> float:
     return float(np.mean(xs)) if xs else 0.0
+
 
 def _min_max(xs: List[float]) -> Dict[str, Optional[float]]:
     if not xs:
         return {"min": None, "max": None}
     return {"min": float(np.min(xs)), "max": float(np.max(xs))}
 
+
 def _delta_num(a: Optional[float], b: Optional[float]) -> Optional[float]:
     if a is None or b is None:
         return None
     return float(b) - float(a)
+
 
 def _roc_auc(probs: np.ndarray, labels: np.ndarray) -> float:
     if probs.size == 0:
@@ -430,6 +405,7 @@ def _roc_auc(probs: np.ndarray, labels: np.ndarray) -> float:
     auc = (sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
     return float(auc)
 
+
 def _roc_curve(probs: np.ndarray, labels: np.ndarray, points: int = 200) -> Tuple[np.ndarray, np.ndarray]:
     if probs.size == 0:
         return np.zeros(1), np.zeros(1)
@@ -448,6 +424,7 @@ def _roc_curve(probs: np.ndarray, labels: np.ndarray, points: int = 200) -> Tupl
         fpr[i] = fp / (fp + tn) if (fp + tn) > 0 else 0.0
     return fpr, tpr
 
+
 def _pr_curve(probs: np.ndarray, labels: np.ndarray, points: int = 200) -> Tuple[np.ndarray, np.ndarray]:
     if probs.size == 0:
         return np.zeros(1), np.zeros(1)
@@ -465,6 +442,7 @@ def _pr_curve(probs: np.ndarray, labels: np.ndarray, points: int = 200) -> Tuple
         recall[i] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     return precision, recall
 
+
 def _reliability_bins(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> List[Dict[str, Any]]:
     centers = np.linspace(0.05, 0.95, n_bins, dtype=np.float32)
     rows: List[Dict[str, Any]] = []
@@ -477,6 +455,7 @@ def _reliability_bins(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -
         rows.append({"prob_center": float(c), "expected_pos_rate": float(c), "observed_pos_rate": obs, "count": int(np.sum(mask))})
     return rows
 
+
 def _expected_calibration_error(rows: List[Dict[str, Any]]) -> float:
     if not rows:
         return 0.0
@@ -485,6 +464,6 @@ def _expected_calibration_error(rows: List[Dict[str, Any]]) -> float:
         return 0.0
     acc = 0.0
     for r in rows:
-        w = r.get("count", 0) / total
+        w = r.get("count", 0) / total if total else 0.0
         acc += w * abs(float(r.get("observed_pos_rate", 0.0)) - float(r.get("expected_pos_rate", 0.0)))
     return float(acc)

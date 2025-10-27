@@ -26,9 +26,7 @@ except Exception:
 
 
 # small helpers
-
 def _get(obj: Any, key: str, default=None):
-    """Safe get from object or dict (works with SimpleNamespace)."""
     if obj is None:
         return default
     if isinstance(obj, dict):
@@ -66,7 +64,6 @@ def _esc(s: str) -> str:
 
 
 # public API
-
 def generate_report(
     run_id: int,
     *,
@@ -90,9 +87,12 @@ def generate_report(
 
     thresholds, briers = _collect_thresholds_briers(cal_rows)
 
+    # build pseudo labels so charts & per-learner metrics have data
+    pseudo = _pseudo_from_traces(traces_json)
+
     snapshot = metrics_snapshot(
         _as_traces_with_thresholds(traces_json, thresholds),
-        pseudo_labels={},
+        pseudo_labels=pseudo,
     )
 
     labels = _load_doc_labels()
@@ -104,7 +104,7 @@ def generate_report(
     cfg_str = _pretty_json(run.get("config_json", "{}"))
     cal_table = _calibration_table(cal_rows, thresholds, briers)
     run_table = _run_table(snapshot.get("run", {}), traces_json)
-    per_learner_rows = _per_learner_rows(snapshot.get("per_learner", {}))
+    per_learner_rows = _per_learner_rows(snapshot.get("per_learner", {}) or {}, thresholds)
     examples = _select_examples(traces_json, labels=labels)
     clusters = snapshot.get("clusters", [])
 
@@ -137,15 +137,12 @@ def generate_report(
 
 
 # persistence helpers
-
 def _safe_get_calibrations(run_id: int) -> List[Dict[str, Any]]:
     try:
-        # preferred helper if available
         if hasattr(store, "get_calibrations_for_run"):
             rows = store.get_calibrations_for_run(run_id)
             if rows:
                 return rows
-        # classic shape
         if hasattr(store, "get_calibrations"):
             return store.get_calibrations(run_id)
     except Exception:
@@ -162,7 +159,6 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
     thresholds: Dict[str, Optional[float]] = {}
     briers: Dict[str, Optional[float]] = {}
 
-    # First pass: whatever is in rows
     for row in cal_rows:
         name = row.get("learner_name") or row.get("learner") or ""
         if not name:
@@ -180,7 +176,6 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
         except Exception:
             pass
 
-        # Direct columns fallback
         if thr is None and isinstance(row.get("threshold"), (int, float)):
             thr = float(row["threshold"])
         if br is None and isinstance(row.get("brier"), (int, float)):
@@ -191,7 +186,7 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
         thresholds[name] = thr if isinstance(thr, (int, float)) else None
         briers[name] = br if isinstance(br, (int, float)) else None
 
-    # Second pass: try learner states (preferred, overwrites if present)
+    # prefer values saved on learner state if present
     for row in cal_rows:
         name = row.get("learner_name") or row.get("learner") or ""
         if not name:
@@ -202,19 +197,13 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
             st = None
         if st is None:
             continue
-
-        # Calibration block on state
         cal = _get(st, "calibration")
-        st_thr = _get(cal, "threshold")
-        if st_thr is None and isinstance(cal, dict):
-            st_thr = cal.get("thr") or cal.get("cutoff")
+        st_thr = _get(cal, "threshold") or _get(cal, "thr") or _get(cal, "cutoff")
         st_br = _get(cal, "brier_score", _get(cal, "brier"))
-
         if st_thr is None:
             st_thr = _get(st, "threshold")
         if st_br is None:
             st_br = _get(st, "brier_score", _get(st, "brier"))
-
         if isinstance(st_thr, (int, float)):
             thresholds[name] = float(st_thr)
         if isinstance(st_br, (int, float)):
@@ -224,6 +213,14 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
 
 
 # snapshot helpers
+def _pseudo_from_traces(traces_json: List[Dict[str, Any]]) -> Dict[str, int]:
+    pseudo: Dict[str, int] = {}
+    for t in traces_json:
+        pk = t.get("pair_key")
+        fl = (t.get("final_label") or "").upper()
+        if pk and fl in ("DUPLICATE", "NON_DUPLICATE"):
+            pseudo[pk] = 1 if fl == "DUPLICATE" else 0
+    return pseudo
 
 def _as_traces_with_thresholds(traces_json: List[Dict[str, Any]], thresholds: Dict[str, Optional[float]]):
     from types import SimpleNamespace
@@ -253,7 +250,6 @@ def _as_traces_with_thresholds(traces_json: List[Dict[str, Any]], thresholds: Di
 
 
 # table builders
-
 def _calibration_table(cal_rows: List[Dict[str, Any]], thresholds: Dict[str, Any], briers: Dict[str, Any]):
     rows = []
     for r in cal_rows:
@@ -308,7 +304,7 @@ def _run_table(run: Dict[str, Any], traces_json: List[Dict[str, Any]]):
     ]
 
 
-def _per_learner_rows(per_learner: Dict[str, Any]) -> List[List[str]]:
+def _per_learner_rows(per_learner: Dict[str, Any], thresholds: Dict[str, Optional[float]]) -> List[List[str]]:
     rows: List[List[str]] = []
     if not isinstance(per_learner, dict):
         return rows
@@ -320,10 +316,10 @@ def _per_learner_rows(per_learner: Dict[str, Any]) -> List[List[str]]:
                 _fmt_num(_get(m, "pos_rate")),
                 _fmt_num(_get(m, "auc")),
                 _fmt_num(_get(m, "brier")),
-                _fmt_num(_get(m, "threshold")),
-                _fmt_num(_get(m, "target_precision", _get(m, "target"))),
+                _fmt_num(thresholds.get(name)),
             ]
         )
+    # keep consistent order
     order = {"simhash": 0, "minhash": 1, "embedding": 2}
     rows.sort(key=lambda r: order.get(r[0].split()[0].lower(), 99))
     return rows
@@ -337,7 +333,7 @@ def _select_examples(
     k_unc: int = 5,
     labels: Optional[Dict[str, str]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    labels = labels or {}
+    labels = labels or []
     easy: List[Dict[str, Any]] = []
     hard: List[Dict[str, Any]] = []
     uncertain: List[Dict[str, Any]] = []
@@ -400,8 +396,8 @@ def _render_all_charts(charts: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
 
         # Reliability
         rel = chart.get("reliability") or []
-        xs = [ _get(r, "expected_pos_rate", 0.0) for r in rel ]
-        ys = [ _get(r, "observed_pos_rate", 0.0) for r in rel ]
+        xs = [_get(r, "expected_pos_rate", 0.0) for r in rel]
+        ys = [_get(r, "observed_pos_rate", 0.0) for r in rel]
         imgs["reliability"] = _line_to_data_uri(
             xs, ys,
             "Predicted probability", "Observed positive rate",
@@ -480,7 +476,6 @@ def _hist_to_data_uri(edges, pos, neg, xlabel, ylabel, title) -> str:
 
 
 # HTML / MD rendering
-
 def _render_html(
     run_id: int,
     started: Optional[str],
@@ -523,7 +518,7 @@ def _render_html(
     run_table_html = _table_html(["Metric", "Value"], [[r["metric"], r["value"]] for r in run_table])
 
     # Per-learner metrics
-    pl_headers = ["Learner", "N", "PosRate", "AUC", "Brier", "Threshold", "Target precision"]
+    pl_headers = ["Learner", "N", "PosRate", "AUC", "Brier", "Threshold"]
     pl_html = _table_html(pl_headers, per_learner_rows) if per_learner_rows else "<p class='muted'>No per-learner metrics.</p>"
 
     # Calibration snapshot
@@ -617,7 +612,7 @@ def _render_markdown(
     if per_learner_rows:
         lines.append(
             _table_md(
-                ["Learner", "N", "PosRate", "AUC", "Brier", "Threshold", "Target precision"],
+                ["Learner", "N", "PosRate", "AUC", "Brier", "Threshold"],
                 per_learner_rows,
             )
         )
@@ -642,6 +637,17 @@ def _render_markdown(
 
 
 # HTML/MD section builders
+def _derive_agreed_from_trace(tr: Dict[str, Any]) -> List[str]:
+    agreed: List[str] = []
+    for name, v in (tr.get("learners") or {}).items():
+        try:
+            thr = v.get("threshold")
+            prob = float(_get(v, "prob", 0.0))
+            if isinstance(thr, (int, float)) and prob >= float(thr):
+                agreed.append(name)
+        except Exception:
+            pass
+    return sorted(agreed)
 
 def _examples_html(examples: Dict[str, List[Dict[str, Any]]]) -> str:
     out = []
@@ -658,13 +664,15 @@ def _examples_html(examples: Dict[str, List[Dict[str, Any]]]) -> str:
         body = []
         for tr in rows:
             learners = ", ".join(f"{_esc(k)}={float(_get(v,'prob',0.0)):.2f}" for k, v in (tr.get("learners") or {}).items())
+            agreed = tr.get("agreed_learners") or _derive_agreed_from_trace(tr)
+            escal = " → ".join(tr.get("escalation_steps", []))
             body.append(
                 [
                     _esc(tr.get("a_name") or tr.get("a_id") or ""),
                     _esc(tr.get("b_name") or tr.get("b_id") or ""),
                     _esc(tr.get("final_label", "")),
-                    _esc(", ".join(tr.get("agreed_learners", []))),
-                    _esc(" → ".join(tr.get("escalation_steps", []))),
+                    _esc(", ".join(agreed)),
+                    _esc(escal),
                     _esc(learners),
                 ]
             )
@@ -688,13 +696,15 @@ def _examples_md(examples: Dict[str, List[Dict[str, Any]]]) -> List[str]:
         body = []
         for tr in rows:
             learners = ", ".join(f"{k}={float(_get(v,'prob',0.0)):.2f}" for k, v in (tr.get("learners") or {}).items())
+            agreed = tr.get("agreed_learners") or _derive_agreed_from_trace(tr)
+            escal = " → ".join(tr.get("escalation_steps", []))
             body.append(
                 [
                     tr.get("a_name") or tr.get("a_id") or "",
                     tr.get("b_name") or tr.get("b_id") or "",
                     tr.get("final_label", ""),
-                    ", ".join(tr.get("agreed_learners", [])),
-                    " → ".join(tr.get("escalation_steps", [])),
+                    ", ".join(agreed),
+                    escal,
                     learners,
                 ]
             )
@@ -711,7 +721,7 @@ def _traces_html(traces: List[Dict[str, Any]], labels: Dict[str, str]) -> str:
     for t in traces[:1000]:
         a = _pretty_doc(t.get("a_id"), labels)
         b = _pretty_doc(t.get("b_id"), labels)
-        agreed = ", ".join(t.get("agreed_learners", []))
+        agreed = t.get("agreed_learners") or _derive_agreed_from_trace(t)
         esc = " → ".join(t.get("escalation_steps", []))
         learners = t.get("learners") or {}
         plist = []
@@ -720,7 +730,7 @@ def _traces_html(traces: List[Dict[str, Any]], labels: Dict[str, str]) -> str:
                 plist.append(f"{k}:{float(_get(v,'prob',0.0)):.3f}")
             except Exception:
                 plist.append(f"{k}:?")
-        body.append([a, b, t.get("final_label",""), t.get("dup_kind",""), agreed, esc, ", ".join(plist)])
+        body.append([a, b, t.get("final_label",""), t.get("dup_kind",""), ", ".join(agreed), esc, ", ".join(plist)])
     return _table_html(hdr, body)
 
 
@@ -730,7 +740,7 @@ def _clusters_html(clusters: List[Dict[str, Any]], labels: Dict[str, str]) -> st
     hdr = ["#", "Size", "Members", "Avg prob (simhash|minhash|embed)", "Dispersion (min..max)"]
     body = []
     for c in clusters:
-        members = [ _pretty_doc(m, labels) for m in c.get("members", []) ]
+        members = [_pretty_doc(m, labels) for m in c.get("members", [])]
         avg = f"{_fmt_num(c.get('avg_simhash_prob'))}|{_fmt_num(c.get('avg_minhash_prob'))}|{_fmt_num(c.get('avg_embedding_prob'))}"
         disp = f"{_disp(c.get('dispersion_simhash'))} | {_disp(c.get('dispersion_minhash'))} | {_disp(c.get('dispersion_embedding'))}"
         body.append([str(c.get("cluster_index")), str(c.get("size")), ", ".join(members), avg, disp])

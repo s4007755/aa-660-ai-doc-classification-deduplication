@@ -1,0 +1,341 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Run 85 Report</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; color: #1f2937; }
+      h1 { font-size: 24px; margin: 0 0 12px 0; }
+      h2 { font-size: 18px; margin-top: 24px; }
+      h3 { font-size: 15px; margin-top: 16px; }
+      code, pre { background: #f9fafb; padding: 8px; border-radius: 6px; display: block; overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+      th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; font-size: 13px; vertical-align: top; }
+      th { background: #f3f4f6; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 9999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+      .muted { color:#6b7280; }
+      img.chart { width: 100%; height: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+    </style>
+    </head>
+<body>
+<h1>Duplicate Detection Report — Run 85</h1>
+<p><span class='pill'>Started</span> 2025-10-25 08:47:20 &nbsp;&nbsp; <span class='pill'>Ended</span> 2025-10-25 08:47:31 &nbsp;&nbsp; <span class="pill">Notes</span> Balanced</p>
+
+<h2>Run summary</h2>
+<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody><tr><td>Total pairs</td><td>63</td></tr><tr><td>Exact duplicates</td><td>54</td></tr><tr><td>Near duplicates</td><td>9</td></tr><tr><td>Duplicates (total)</td><td>63</td></tr><tr><td>Uncertain</td><td>0</td></tr><tr><td>Consensus rate</td><td>100.0%</td></tr><tr><td>Escalations</td><td>0.0%</td></tr></tbody></table>
+
+<h2>Per-learner metrics</h2>
+<p class='muted'>No per-learner metrics.</p>
+
+<h2>Calibration snapshot</h2>
+<table><thead><tr><th>Learner</th><th>Method</th><th>Threshold</th><th>Brier</th><th>Reliability (center:obs(count))</th></tr></thead><tbody><tr><td>embedding</td><td>isotonic</td><td>0.931</td><td>0.226</td><td>0.05:0.00(0), 0.15:0.00(0), 0.25:0.00(0), 0.35:0.00(0), 0.45:0.00(0), 0.55:0.00(216)</td></tr><tr><td>minhash</td><td>isotonic</td><td>0.914</td><td>0.019</td><td>0.05:0.00(225), 0.15:0.00(2), 0.25:0.00(1), 0.35:0.00(0), 0.45:0.00(0), 0.55:0.00(0)</td></tr><tr><td>simhash</td><td>isotonic</td><td>0.931</td><td>0.215</td><td>0.05:0.00(0), 0.15:0.00(0), 0.25:0.00(0), 0.35:0.00(0), 0.45:0.00(0), 0.55:0.00(224)</td></tr></tbody></table>
+
+<h2>Charts</h2>
+<p class='muted'>Charts unavailable.</p>
+
+<h2>Examples</h2>
+<h3>Easy positives</h3>
+<table><thead><tr><th>Doc A</th><th>Doc B</th><th>Final</th><th>Agreed</th><th>Escalation</th><th>Per-learner probs</th></tr></thead><tbody><tr><td>A_Byte_of_Python,_v1.92_(for_Python_3.0)_(2009).pdf (026f5caa)</td><td>A_Byte_of_Python,_v1.92_(for_Python_3.0)_(2009).pdf (ab3f1a4b)</td><td>DUPLICATE</td><td></td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>fssPL102-585_2017Rfm.docx (0dc5ff2b)</td><td>fssPL102-585_2017Rfm.docx (4d46149e)</td><td>DUPLICATE</td><td></td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>Animal Farm by George Orwell.pdf (2559192e)</td><td>DUPLICATE</td><td></td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>Animal Farm by George Orwell - Copy.pdf (7c7e4120)</td><td>DUPLICATE</td><td></td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>story.pdf (af650506)</td><td>DUPLICATE</td><td></td><td></td><td>simhash=1.00, minhash=1.00, embedding=1.00</td></tr></tbody></table>
+<h3>Hard but resolved (escalated)</h3>
+<p><i>None</i></p>
+<h3>Uncertain</h3>
+<p><i>None</i></p>
+
+<h2>Decision traces</h2>
+<table><thead><tr><th>Doc A</th><th>Doc B</th><th>Final</th><th>Dup kind</th><th>Agreed</th><th>Escalation</th><th>Per-learner (prob)</th></tr></thead><tbody><tr><td>A_Byte_of_Python,_v1.92_(for_Python_3.0)_(2009).pdf (026f5caa)</td><td>A_Byte_of_Python,_v1.92_(for_Python_3.0)_(2009).pdf (ab3f1a4b)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>fssPL102-585_2017Rfm.docx (0dc5ff2b)</td><td>fssPL102-585_2017Rfm.docx (4d46149e)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>Animal Farm by George Orwell.pdf (2559192e)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>Animal Farm by George Orwell - Copy.pdf (7c7e4120)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>story.pdf (af650506)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>Animal Farm by George Orwell.pdf (c1fd6613)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (12552eb1)</td><td>story.pdf (c540f801)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>ArthurEdwardWaite.pdf (128e9b96)</td><td>ArthurEdwardWaite.pdf (34d9ec58)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>1607.03591.pdf (1d9a8caf)</td><td>1607.03591.pdf (c56f8121)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>atp3_21x11.pdf (1f362000)</td><td>atp3_21x11.pdf (6602ae76)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>maths.pdf (21cffc58)</td><td>MasteringTheFundamentalsOfMathematics.pdf (6ccc40ed)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>maths.pdf (21cffc58)</td><td>MasteringTheFundamentalsOfMathematics.pdf (85e42580)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>maths.pdf (21cffc58)</td><td>maths.pdf (f6fb0eb8)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell.pdf (2559192e)</td><td>Animal Farm by George Orwell - Copy.pdf (7c7e4120)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell.pdf (2559192e)</td><td>story.pdf (af650506)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell.pdf (2559192e)</td><td>Animal Farm by George Orwell.pdf (c1fd6613)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell.pdf (2559192e)</td><td>story.pdf (c540f801)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>05. SQL Injection Attacks and Defense.pdf (28adc497)</td><td>05. SQL Injection Attacks and Defense.pdf (8631a48f)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>DonaldAlexanderMackenzie.pdf (3f7f671d)</td><td>document1.pdf (50c05952)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>DonaldAlexanderMackenzie.pdf (3f7f671d)</td><td>document1.pdf (879ddc4a)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>DonaldAlexanderMackenzie.pdf (3f7f671d)</td><td>DonaldAlexanderMackenzie.pdf (e2f17b12)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>g40.docx (47279f7c)</td><td>g41.docx (56411017)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>g40.docx (47279f7c)</td><td>23287-g40.docx (58887850)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>g40.docx (47279f7c)</td><td>23287-g40.docx (a3e526b1)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>g40.docx (47279f7c)</td><td>g40 - Copy.docx (c25a35aa)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>g40.docx (47279f7c)</td><td>g40.docx (f3ff512a)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>atp3_90x1.pdf (4751b936)</td><td>atp3_90x1.pdf (dcc3e08e)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>physics0601009.pdf (4cca3453)</td><td>physics0601009.pdf (98304783)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>biostat.pdf (4eb62fb0)</td><td>biostat - Copy.pdf (53b31bf1)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>biostat.pdf (4eb62fb0)</td><td>biostat - Copy.pdf (53e16ed0)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>biostat.pdf (4eb62fb0)</td><td>biostat.pdf (8dd76411)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>document1.pdf (50c05952)</td><td>document1.pdf (879ddc4a)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>document1.pdf (50c05952)</td><td>DonaldAlexanderMackenzie.pdf (e2f17b12)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>biostat - Copy.pdf (53b31bf1)</td><td>biostat - Copy.pdf (53e16ed0)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>biostat - Copy.pdf (53b31bf1)</td><td>biostat.pdf (8dd76411)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>biostat - Copy.pdf (53e16ed0)</td><td>biostat.pdf (8dd76411)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>g41.docx (56411017)</td><td>23287-g40.docx (58887850)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>g41.docx (56411017)</td><td>23287-g40.docx (a3e526b1)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>g41.docx (56411017)</td><td>g40 - Copy.docx (c25a35aa)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>g41.docx (56411017)</td><td>g40.docx (f3ff512a)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>23287-g40.docx (58887850)</td><td>23287-g40.docx (a3e526b1)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>23287-g40.docx (58887850)</td><td>g40 - Copy.docx (c25a35aa)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>23287-g40.docx (58887850)</td><td>g40.docx (f3ff512a)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>MasteringTheFundamentalsOfMathematics.pdf (6ccc40ed)</td><td>MasteringTheFundamentalsOfMathematics.pdf (85e42580)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>MasteringTheFundamentalsOfMathematics.pdf (6ccc40ed)</td><td>maths.pdf (f6fb0eb8)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>ASCII Codes.docx (6d9fe4a5)</td><td>ASCII Codes.docx (a83581f2)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>The Hacker Playbook 3.pdf (6e96d8ed)</td><td>The Hacker Playbook 3.pdf (a49b36a7)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>1406.2661.pdf (6fbbc2b0)</td><td>1406.2661.pdf (c5bc9033)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (7c7e4120)</td><td>story.pdf (af650506)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (7c7e4120)</td><td>Animal Farm by George Orwell.pdf (c1fd6613)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell - Copy.pdf (7c7e4120)</td><td>story.pdf (c540f801)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>md715-r15.docx (83f2fe79)</td><td>md715-r15.docx (c6b0cc5a)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>MasteringTheFundamentalsOfMathematics.pdf (85e42580)</td><td>maths.pdf (f6fb0eb8)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>document1.pdf (879ddc4a)</td><td>DonaldAlexanderMackenzie.pdf (e2f17b12)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>23287-g40.docx (a3e526b1)</td><td>g40 - Copy.docx (c25a35aa)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr><tr><td>23287-g40.docx (a3e526b1)</td><td>g40.docx (f3ff512a)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>story.pdf (af650506)</td><td>Animal Farm by George Orwell.pdf (c1fd6613)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>story.pdf (af650506)</td><td>story.pdf (c540f801)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Understanding_Sustainable_Architecture.pdf (afdbf4b5)</td><td>Understanding_Sustainable_Architecture.pdf (c3a58788)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>S9_Mitosis (1).pdf (b4a67cd2)</td><td>S9_Mitosis (1).pdf (efe4031c)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>atp4_90.pdf (bb614a32)</td><td>atp4_90.pdf (be6bfe78)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>Animal Farm by George Orwell.pdf (c1fd6613)</td><td>story.pdf (c540f801)</td><td>DUPLICATE</td><td>EXACT</td><td></td><td></td><td>simhash:1.000, minhash:1.000, embedding:1.000</td></tr><tr><td>g40 - Copy.docx (c25a35aa)</td><td>g40.docx (f3ff512a)</td><td>DUPLICATE</td><td>NEAR</td><td></td><td></td><td>simhash:0.932, minhash:0.915, embedding:0.500</td></tr></tbody></table>
+
+<h2>Clusters (from DUPLICATE traces)</h2>
+<table><thead><tr><th>#</th><th>Size</th><th>Members</th><th>Avg prob (simhash|minhash|embed)</th><th>Dispersion (min..max)</th></tr></thead><tbody><tr><td>1</td><td>2</td><td>A_Byte_of_Python,_v1.92_(for_Python_3.0)_(2009).pdf (026f5caa), A_Byte_of_Python,_v1.92_(for_Python_3.0)_(2009).pdf (ab3f1a4b)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>2</td><td>2</td><td>fssPL102-585_2017Rfm.docx (0dc5ff2b), fssPL102-585_2017Rfm.docx (4d46149e)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>3</td><td>6</td><td>Animal Farm by George Orwell - Copy.pdf (12552eb1), Animal Farm by George Orwell.pdf (2559192e), Animal Farm by George Orwell - Copy.pdf (7c7e4120), story.pdf (af650506), Animal Farm by George Orwell.pdf (c1fd6613), story.pdf (c540f801)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>4</td><td>2</td><td>ArthurEdwardWaite.pdf (128e9b96), ArthurEdwardWaite.pdf (34d9ec58)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>5</td><td>2</td><td>1607.03591.pdf (1d9a8caf), 1607.03591.pdf (c56f8121)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>6</td><td>2</td><td>atp3_21x11.pdf (1f362000), atp3_21x11.pdf (6602ae76)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>7</td><td>4</td><td>maths.pdf (21cffc58), MasteringTheFundamentalsOfMathematics.pdf (6ccc40ed), MasteringTheFundamentalsOfMathematics.pdf (85e42580), maths.pdf (f6fb0eb8)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>8</td><td>2</td><td>05. SQL Injection Attacks and Defense.pdf (28adc497), 05. SQL Injection Attacks and Defense.pdf (8631a48f)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>9</td><td>4</td><td>DonaldAlexanderMackenzie.pdf (3f7f671d), document1.pdf (50c05952), document1.pdf (879ddc4a), DonaldAlexanderMackenzie.pdf (e2f17b12)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>10</td><td>6</td><td>g40.docx (47279f7c), g41.docx (56411017), 23287-g40.docx (58887850), 23287-g40.docx (a3e526b1), g40 - Copy.docx (c25a35aa), g40.docx (f3ff512a)</td><td>0.959|0.949|0.700</td><td>0.932..1.000 | 0.915..1.000 | 0.500..1.000</td></tr><tr><td>11</td><td>2</td><td>atp3_90x1.pdf (4751b936), atp3_90x1.pdf (dcc3e08e)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>12</td><td>2</td><td>physics0601009.pdf (4cca3453), physics0601009.pdf (98304783)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>13</td><td>4</td><td>biostat.pdf (4eb62fb0), biostat - Copy.pdf (53b31bf1), biostat - Copy.pdf (53e16ed0), biostat.pdf (8dd76411)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>14</td><td>2</td><td>ASCII Codes.docx (6d9fe4a5), ASCII Codes.docx (a83581f2)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>15</td><td>2</td><td>The Hacker Playbook 3.pdf (6e96d8ed), The Hacker Playbook 3.pdf (a49b36a7)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>16</td><td>2</td><td>1406.2661.pdf (6fbbc2b0), 1406.2661.pdf (c5bc9033)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>17</td><td>2</td><td>md715-r15.docx (83f2fe79), md715-r15.docx (c6b0cc5a)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>18</td><td>2</td><td>Understanding_Sustainable_Architecture.pdf (afdbf4b5), Understanding_Sustainable_Architecture.pdf (c3a58788)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>19</td><td>2</td><td>S9_Mitosis (1).pdf (b4a67cd2), S9_Mitosis (1).pdf (efe4031c)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr><tr><td>20</td><td>2</td><td>atp4_90.pdf (bb614a32), atp4_90.pdf (be6bfe78)</td><td>1.000|1.000|1.000</td><td>1.000..1.000 | 1.000..1.000 | 1.000..1.000</td></tr></tbody></table>
+
+<h2>Config</h2>
+<pre><code>{
+  "pipeline": {
+    "arbiter": {
+      "require_agreement": 2,
+      "gray_zone_margin": 0.05,
+      "max_escalation_steps": 3,
+      "escalation_order": [
+        "normalize_strict",
+        "minhash_alt_shingle",
+        "embed_whiten"
+      ],
+      "max_self_train_epochs": 2,
+      "strong_margin": 0.07,
+      "random_state": 13,
+      "near_support_band_mult": 2.0,
+      "near_support_min_band": 0.02,
+      "enable_exact_check": true,
+      "exact_normalization": "unicode_lines"
+    },
+    "candidates": {
+      "use_lsh": true,
+      "shingle_size": 3,
+      "num_perm": 64,
+      "lsh_threshold": 0.6,
+      "max_candidates_per_doc": 2000,
+      "max_total_candidates": null
+    },
+    "bootstrap": {
+      "max_pos_pairs": 50000,
+      "max_neg_pairs": 50000
+    },
+    "self_learning": {
+      "enabled": true,
+      "epochs": 2
+    },
+    "persist": true
+  },
+  "learners": {
+    "simhash": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": 5,
+        "extra_2": 255,
+        "extra_3": 2,
+        "extra_4": false,
+        "extra_5": false
+      }
+    },
+    "minhash": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": 3,
+        "extra_2": 64,
+        "extra_3": 0.6,
+        "extra_4": false
+      }
+    },
+    "embedding": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": "sentence-transformers/all-MiniLM-L6-v2",
+        "extra_2": 64,
+        "extra_3": 0.985,
+        "extra_4": false,
+        "extra_5": false,
+        "extra_6": false
+      }
+    }
+  },
+  "corpus_stats": {
+    "doc_count": 54,
+    "avg_doc_len": 44501.666666666664,
+    "lang_counts": {},
+    "extras": {
+      "top_tokens": [
+        [
+          "can",
+          9702
+        ],
+        [
+          "we",
+          8344
+        ],
+        [
+          "not",
+          8258
+        ],
+        [
+          "●●",
+          7540
+        ],
+        [
+          "if",
+          6486
+        ],
+        [
+          "have",
+          6480
+        ],
+        [
+          "all",
+          5708
+        ],
+        [
+          "data",
+          5516
+        ],
+        [
+          "will",
+          5395
+        ],
+        [
+          "when",
+          5334
+        ],
+        [
+          "which",
+          5312
+        ],
+        [
+          "they",
+          5024
+        ],
+        [
+          "sql",
+          4470
+        ],
+        [
+          "one",
+          4468
+        ],
+        [
+          "use",
+          4382
+        ],
+        [
+          "●●●",
+          4376
+        ],
+        [
+          "more",
+          4168
+        ],
+        [
+          "v2x",
+          4020
+        ],
+        [
+          "there",
+          3958
+        ],
+        [
+          "has",
+          3926
+        ],
+        [
+          "their",
+          3864
+        ],
+        [
+          "figure",
+          3708
+        ],
+        [
+          "had",
+          3696
+        ],
+        [
+          "using",
+          3646
+        ],
+        [
+          "between",
+          3610
+        ],
+        [
+          "than",
+          3576
+        ],
+        [
+          "other",
+          3550
+        ],
+        [
+          "may",
+          3533
+        ],
+        [
+          "number",
+          3527
+        ],
+        [
+          "but",
+          3520
+        ],
+        [
+          "pc5",
+          3492
+        ],
+        [
+          "support",
+          3436
+        ],
+        [
+          "two",
+          3374
+        ],
+        [
+          "company",
+          3372
+        ],
+        [
+          "probability",
+          3344
+        ],
+        [
+          "each",
+          3304
+        ],
+        [
+          "enemy",
+          3282
+        ],
+        [
+          "used",
+          3226
+        ],
+        [
+          "what",
+          3222
+        ],
+        [
+          "he",
+          3156
+        ],
+        [
+          "where",
+          3072
+        ],
+        [
+          "would",
+          3032
+        ],
+        [
+          "application",
+          2962
+        ],
+        [
+          "information",
+          2922
+        ],
+        [
+          "his",
+          2848
+        ],
+        [
+          "should",
+          2843
+        ],
+        [
+          "such",
+          2798
+        ],
+        [
+          "also",
+          2796
+        ],
+        [
+          "any",
+          2702
+        ],
+        [
+          "then",
+          2686
+        ]
+      ],
+      "vocab_size": 80358
+    }
+  }
+}</code></pre>
+</body></html>

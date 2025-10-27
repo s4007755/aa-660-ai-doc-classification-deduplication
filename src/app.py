@@ -1,11 +1,16 @@
 # src/app.py
 from __future__ import annotations
 
+import hashlib
 import os
+import random
+import time
 import threading
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Iterable
+import sqlite3
+from pathlib import Path
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -434,7 +439,33 @@ class App(tk.Tk):
             except Exception as e:
                 messagebox.showerror("DB error", str(e))
                 return
+    # clear existing
+        for iid in self.docs_tree.get_children():
+            self.docs_tree.delete(iid)
 
+        if getattr(self, "_csv_loaded", False):
+            # show CSV docs
+            for d in self.docs:
+                self.docs_tree.insert(
+                    "", tk.END,
+                    values=(d.doc_id, f"csv_row_{d.doc_id}", "—", len(d.text) // 1024, "CSV import")
+                )
+            self.lbl_doc_count.configure(text=f"{len(self.docs)} rows from CSV")
+        else:
+            # fall back to DB
+            try:
+                rows = sqlite_store.get_all_document_files()
+            except Exception as e:
+                messagebox.showerror("DB error", str(e))
+                return
+
+            for r in rows:
+                doc_id = r.get("doc_id", "")
+                lang = r.get("language") or "—"
+                size_kb = int((r.get("filesize") or 0) / 1024)
+                fname = r.get("filename") or "—"
+                fpath = r.get("filepath") or ""
+                self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
             for r in rows:
                 doc_id = r.get("doc_id", "")
                 lang = r.get("language") or "—"
@@ -447,8 +478,14 @@ class App(tk.Tk):
             total_files = len(rows)
             self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
             self.lbl_files.configure(text=f"Files: {total_files}")
+            unique_docs = len({r.get("doc_id") for r in rows})
+            total_files = len(rows)
+            self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
+            self.lbl_files.configure(text=f"Files: {total_files}")
 
             self._refresh_docs_from_db()
+            self._refresh_docs_from_db()
+
 
     # helper: map doc_id -> filename (for trace labels)
     def _doc_labels_from_db(self) -> Dict[str, str]:
@@ -823,6 +860,7 @@ class App(tk.Tk):
             messagebox.showerror("Delete failed", str(e))
 
     """def _ingest_paths(self, paths: Iterable[str]):
+    """def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
         self.doc_status = getattr(self, "doc_status", None)
         if self.doc_status:
@@ -1173,4 +1211,6 @@ def import_rows_from_csv(csv_path="dataset/True.csv"):
     print("Imported 2000 CSV rows into database.")
 
 if __name__ == "__main__":
+    # Comment out the below function as needed to insert more data from CSV
+    # import_rows_from_csv() 
     main()

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import re
+import os
+import concurrent.futures
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
+import faiss
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -79,6 +82,8 @@ class EmbeddingLearner(ILearner):
         self._istate = _State()
         self._model: Optional[Any] = None
         self._using_fallback = False
+        self._max_workers: int = int(self._config.extras.get("max_workers", os.cpu_count() or 4))
+
 
     # config/state
 
@@ -185,10 +190,17 @@ class EmbeddingLearner(ILearner):
             internals=None,
         )
 
-    def batch_score(self, pairs: Iterable[Pair]) -> List[LearnerOutput]:
+    def batch_score(
+        self,
+        pairs: Iterable[Pair],
+        use_parallel: bool = True,
+        max_workers: int = os.cpu_count() or 4
+    ) -> List[LearnerOutput]:
         pairs_list = list(pairs)
         if not pairs_list:
             return []
+
+        # Embed each unique document once
         unique: Dict[str, str] = {}
         for a, b in pairs_list:
             unique.setdefault(a.doc_id, a.text or "")
@@ -201,25 +213,100 @@ class EmbeddingLearner(ILearner):
 
         th = self._state.calibration.threshold
         outs: List[LearnerOutput] = []
-        for a, b in pairs_list:
-            e1 = emb_map[a.doc_id]
-            e2 = emb_map[b.doc_id]
-            n1 = float(np.linalg.norm(e1))
-            n2 = float(np.linalg.norm(e2))
-            if n1 == 0.0 and n2 == 0.0:
-                cos = 0.0
-            else:
-                cos = float(np.dot(e1, e2))
+
+        if not use_parallel or len(pairs_list) < 4:
+            # Original sequential loop
+            for a, b in pairs_list:
+                v1 = emb_map[a.doc_id]
+                v2 = emb_map[b.doc_id]
+                n1 = float(np.linalg.norm(v1))
+                n2 = float(np.linalg.norm(v2))
+                cos = 0.0 if (n1 == 0.0 and n2 == 0.0) else float(np.dot(v1, v2))
+                score = _cos_to_unit(cos)
+                prob = apply_binning_or_platt(score, self._state.calibration, self._istate.edges, self._istate.probs)
+
+                top_pairs = self._top_sentence_pairs(a, b, top_k=int(self._config.extras.get("topk_sentences", 3)))
+                warnings: List[str] = []
+                if (not (a.text or "").strip()) and (not (b.text or "").strip()):
+                    warnings.append("Both texts are empty after basic extraction.")
+                elif n1 == 0.0 and n2 == 0.0:
+                    warnings.append("Both embeddings are zero after preprocessing/whitening (no evidence).")
+
+                rationale = {
+                    "cosine": float(cos),
+                    "top_matching_sentences": top_pairs,
+                    "threshold_used": None if th is None else float(th),
+                    "whitening": {
+                        "enabled": bool(self._config.extras.get("whiten", False)),
+                        "remove_top_pc": bool(self._config.extras.get("remove_top_pc", False)),
+                        "has_domain_mean": bool(self._istate.mean is not None),
+                        "has_top_pc": bool(self._istate.top_pc is not None),
+                    },
+                    "model_fallback": bool(self._using_fallback),
+                }
+
+                outs.append(LearnerOutput(
+                    raw_score=float(score),
+                    prob=float(min(prob, 1.0 - 1e-9)),
+                    threshold=th,
+                    rationale=rationale,
+                    warnings=warnings,
+                    internals=None,
+                ))
+            return outs
+
+    # Parallel execution without changing the original logic
+        def _compute_pair(pair: Pair) -> LearnerOutput:
+            a, b = pair
+            v1 = emb_map[a.doc_id]
+            v2 = emb_map[b.doc_id]
+            n1 = float(np.linalg.norm(v1))
+            n2 = float(np.linalg.norm(v2))
+            cos = 0.0 if (n1 == 0.0 and n2 == 0.0) else float(np.dot(v1, v2))
             score = _cos_to_unit(cos)
             prob = apply_binning_or_platt(score, self._state.calibration, self._istate.edges, self._istate.probs)
-            outs.append(LearnerOutput(
+
+            top_pairs = self._top_sentence_pairs(a, b, top_k=int(self._config.extras.get("topk_sentences", 3)))
+            warnings: List[str] = []
+            if (not (a.text or "").strip()) and (not (b.text or "").strip()):
+                warnings.append("Both texts are empty after basic extraction.")
+            elif n1 == 0.0 and n2 == 0.0:
+                warnings.append("Both embeddings are zero after preprocessing/whitening (no evidence).")
+
+            rationale = {
+                "cosine": float(cos),
+                "top_matching_sentences": top_pairs,
+                "threshold_used": None if th is None else float(th),
+                "whitening": {
+                    "enabled": bool(self._config.extras.get("whiten", False)),
+                    "remove_top_pc": bool(self._config.extras.get("remove_top_pc", False)),
+                    "has_domain_mean": bool(self._istate.mean is not None),
+                    "has_top_pc": bool(self._istate.top_pc is not None),
+                },
+                "model_fallback": bool(self._using_fallback),
+            }
+
+            return LearnerOutput(
                 raw_score=float(score),
                 prob=float(min(prob, 1.0 - 1e-9)),
                 threshold=th,
-                rationale={"cosine": float(cos), "threshold_used": None if th is None else float(th), "model_fallback": bool(self._using_fallback)},
-            ))
-        return outs
+                rationale=rationale,
+                warnings=warnings,
+                internals=None,
+            )
 
+        # Parallelize
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_compute_pair, p): p for p in pairs_list}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    outs.append(future.result())
+                except Exception as e:
+                    a, b = futures[future]
+                    print(f"[!] Error scoring pair {a.doc_id} / {b.doc_id}: {e}")
+
+        return outs
+    
     # training
 
     def fit_calibration(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> LearnerState:
@@ -296,27 +383,71 @@ class EmbeddingLearner(ILearner):
         cos = 0.0 if (n1 == 0.0 and n2 == 0.0) else float(np.dot(v1, v2))
         return _cos_to_unit(cos)
 
+
     def _embed_texts(self, texts: List[str]) -> np.ndarray:
+        """Embed multiple texts, optionally in parallel for speed."""
         if not texts:
             return np.zeros((0, 384), dtype=np.float32)
         if self._model is None and not self._using_fallback:
             self.prepare(None)
-        if self._model is None:
-            return _cheap_embed(texts, dim=int(self._config.extras.get("fallback_dim", 384)))
+
+        # --- If using fallback mode, we can parallelize _cheap_embed
+        if self._using_fallback or self._model is None:
+            dim = int(self._config.extras.get("fallback_dim", 384))
+
+            # Split into chunks for workers
+            if len(texts) < 100 or self._max_workers <= 1:
+                return _cheap_embed(texts, dim=dim)
+
+            chunk_size = max(1, len(texts) // self._max_workers)
+            chunks = [texts[i:i+chunk_size] for i in range(0, len(texts), chunk_size)]
+
+            results: List[np.ndarray] = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                futures = [executor.submit(_cheap_embed, ch, dim) for ch in chunks]
+                for f in concurrent.futures.as_completed(futures):
+                    results.append(f.result())
+            return np.vstack(results)
+
+        # --- If using SentenceTransformer, parallelize in chunks too
         try:
-            arr = self._model.encode(
-                texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-                batch_size=int(self._config.extras.get("batch_size", 64)),
-                show_progress_bar=False,
-            ).astype(np.float32)
-            if arr.ndim == 1:
-                arr = arr.reshape(1, -1)
+            batch_size = int(self._config.extras.get("batch_size", 64))
+            if len(texts) <= batch_size or self._max_workers <= 1:
+                arr = self._model.encode(
+                    texts,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                ).astype(np.float32)
+                return arr if arr.ndim > 1 else arr.reshape(1, -1)
+
+            # Split texts into chunks
+            chunk_size = max(1, len(texts) // self._max_workers)
+            chunks = [texts[i:i+chunk_size] for i in range(0, len(texts), chunk_size)]
+
+            def _encode_chunk(chunk):
+                return self._model.encode(
+                    chunk,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                ).astype(np.float32)
+
+            results: List[np.ndarray] = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                futures = [executor.submit(_encode_chunk, ch) for ch in chunks]
+                for f in concurrent.futures.as_completed(futures):
+                    results.append(f.result())
+            arr = np.vstack(results)
             return arr
+
         except Exception:
             self._using_fallback = True
             return _cheap_embed(texts, dim=int(self._config.extras.get("fallback_dim", 384)))
+
+
 
     def _apply_whiten(self, v: np.ndarray) -> np.ndarray:
         v = v.astype(np.float32, copy=True)

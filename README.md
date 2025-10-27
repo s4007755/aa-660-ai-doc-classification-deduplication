@@ -261,6 +261,11 @@ src/
   reporting/                 # HTML/MD report builder
 
 ## Troubleshooting
+- The DB has 2,029 rows by default with stock data from a CSV. To run the algorithm on a smaller set, delete the documents in the GUI first before running the algorithm
+
+- If more data needs to be inserted from the CSV, uncomment the import_rows_from_csv() function in the main app function, and change the number of rows in import_rows_from_csv() function itself to insert more rows. Run the app to see new documents
+
+- Remember to comment out the function and save after running the app to avoid accidentally inserting more data
 
 - First run is slow: models download; keep network open or pre-cache.
 

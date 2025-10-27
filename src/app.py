@@ -10,13 +10,14 @@ from typing import Any, Dict, List, Optional, Iterable
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-# NEW: resource monitoring deps
-import psutil  # pip install psutil
+import psutil
 try:
-    import pynvml  # pip install pynvml (optional)
+    import pynvml
     _NVML_OK = True
 except Exception:
     _NVML_OK = False
+
+import pandas as pd
 
 # Storage and pipeline
 from src.storage import sqlite_store
@@ -391,34 +392,63 @@ class App(tk.Tk):
             if (txt or "").strip()
         ]
 
-    # Fill docs tab table and update file counters
-    def _refresh_docs_tab(self):
-        try:
-            rows = sqlite_store.get_all_document_files()
-        except Exception as e:
-            messagebox.showerror("DB error", str(e))
+    # CSV ingestion
+    def _on_add_csv(self):
+        file_path = filedialog.askopenfilename(title="Select CSV file", filetypes=[("CSV Files", "*.csv")])
+        if not file_path:
             return
+        df = pd.read_csv(file_path)
+        text_col = "text"
+        id_col = "id" if "id" in df.columns else None
+        docs = []
+        for i, row in df.iterrows():
+            doc_id = str(row[id_col]) if id_col else str(i)
+            text = row[text_col]
+            if not text or not str(text).strip():
+                continue
+            docs.append(build_document_view(doc_id=doc_id, text=normalize_text(str(text)), language=None, meta={}))
+        self.docs = docs
+        self.lbl_docs.configure(text=f"Docs: {len(self.docs)}")
+        self._csv_loaded = True
+        self._refresh_docs_tab()
 
-        # clear
+
+    # Fill docs tab table
+    def _refresh_docs_tab(self):
+    # clear existing
         for iid in self.docs_tree.get_children():
             self.docs_tree.delete(iid)
 
-        # fill
-        for r in rows:
-            doc_id = r.get("doc_id", "")
-            lang = r.get("language") or "—"
-            size_kb = int((r.get("filesize") or 0) / 1024)
-            fname = r.get("filename") or "—"
-            fpath = r.get("filepath") or ""
-            self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
+        if getattr(self, "_csv_loaded", False):
+            # show CSV docs
+            for d in self.docs:
+                self.docs_tree.insert(
+                    "", tk.END,
+                    values=(d.doc_id, f"csv_row_{d.doc_id}", "—", len(d.text) // 1024, "CSV import")
+                )
+            self.lbl_doc_count.configure(text=f"{len(self.docs)} rows from CSV")
+        else:
+            # fall back to DB
+            try:
+                rows = sqlite_store.get_all_document_files()
+            except Exception as e:
+                messagebox.showerror("DB error", str(e))
+                return
 
-        # counters: files and unique docs
-        unique_docs = len({r.get("doc_id") for r in rows})
-        total_files = len(rows)
-        self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
-        self.lbl_files.configure(text=f"Files: {total_files}")
+            for r in rows:
+                doc_id = r.get("doc_id", "")
+                lang = r.get("language") or "—"
+                size_kb = int((r.get("filesize") or 0) / 1024)
+                fname = r.get("filename") or "—"
+                fpath = r.get("filepath") or ""
+                self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
 
-        self._refresh_docs_from_db()
+            unique_docs = len({r.get("doc_id") for r in rows})
+            total_files = len(rows)
+            self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
+            self.lbl_files.configure(text=f"Files: {total_files}")
+
+            self._refresh_docs_from_db()
 
     # helper: map doc_id -> filename (for trace labels)
     def _doc_labels_from_db(self) -> Dict[str, str]:
@@ -792,7 +822,7 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Delete failed", str(e))
 
-    def _ingest_paths(self, paths: Iterable[str]):
+    """def _ingest_paths(self, paths: Iterable[str]):
         ps = list(paths)
         self.doc_status = getattr(self, "doc_status", None)
         if self.doc_status:
@@ -848,6 +878,81 @@ class App(tk.Tk):
 
         # file mapping
         sqlite_store.add_file_mapping(doc_id, path, mtime_ns)
+"""
+    def _ingest_paths(self, paths: Iterable[str]):
+        ps = list(paths)
+        if self.doc_status:
+            self.doc_status.configure(text=f"Ingesting {len(ps)} files…")
+            self.update_idletasks()
+
+        def worker(plist: List[str]):
+            docs_batch = []
+            mappings_batch = []
+            ok = 0
+            fail = 0
+
+            for p in plist:
+                try:
+                    doc_entry, mapping_entry = self._ingest_file(p, return_batch=True)
+                    if doc_entry and mapping_entry:
+                        docs_batch.append(doc_entry)
+                        mappings_batch.append(mapping_entry)
+                    ok += 1
+                    if self.doc_status:
+                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
+                except Exception:
+                    fail += 1
+                    if self.doc_status:
+                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
+
+            # Batch insert at the end
+            if docs_batch:
+                sqlite_store.batch_upsert_documents(docs_batch)
+            if mappings_batch:
+                sqlite_store.batch_add_file_mappings(mappings_batch)
+
+            if self.doc_status:
+                self.after(0, lambda: [self._refresh_docs_tab(),
+                                    self.doc_status.configure(text=f"Done. ok={ok}, fail={fail}")])
+
+        threading.Thread(target=worker, args=(ps,), daemon=True).start()
+
+
+    def _ingest_file(self, path: str, return_batch: bool = False):
+        data = _ingestion_mod.extract_document(path)
+        raw_text = data.get("raw_text") or ""
+        meta = data.get("metadata") or {}
+
+        abs_path = os.path.abspath(path)
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except Exception:
+            mtime_ns = 0
+
+        doc_id = hashlib.sha1(f"{abs_path}|{mtime_ns}".encode("utf-8", errors="ignore")).hexdigest()
+        norm = normalize_text(raw_text)
+
+        if return_batch:
+            # Return tuples for batch insertion
+            doc_entry = (doc_id, raw_text, norm, str({
+                "language": meta.get("language"),
+                "filesize": meta.get("filesize") or 0
+            }))
+            mapping_entry = (doc_id, abs_path, mtime_ns)
+            return doc_entry, mapping_entry
+
+        # legacy behavior: single insert
+        sqlite_store.upsert_document(
+            doc_id=doc_id,
+            raw_text=raw_text,
+            normalized_text=norm,
+            meta={
+                "language": meta.get("language"),
+                "filesize": meta.get("filesize") or 0,
+            },
+        )
+        sqlite_store.add_file_mapping(doc_id, abs_path, mtime_ns)
+
 
     # helpers: counters and timer
 
@@ -1015,6 +1120,57 @@ class App(tk.Tk):
 def main():
     App().mainloop()
 
+
+# import first 500 rows from a CSV file with text column field only
+def import_rows_from_csv(csv_path="dataset/True.csv"):
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        return
+
+    if "text" not in df.columns:
+        print("CSV must have a 'text' column.")
+        print(f"Found columns: {df.columns.tolist()}")
+        return
+
+    # Sample 1500 random rows
+    if len(df) < 1500:
+        print(f"⚠️ CSV has only {len(df)} rows, sampling all available.")
+        sampled_df = df.copy()
+    else:
+        sampled_df = df.sample(n=1500, random_state=random.randint(0, 9999))
+
+    duplicates = sampled_df.sample(n=500, replace=False, random_state=random.randint(0, 9999))
+    combined_df = pd.concat([sampled_df, duplicates], ignore_index=True).sample(frac=1).reset_index(drop=True)
+
+    sqlite_store.init_db()
+
+    fake_path = os.path.abspath(csv_path)
+    for i, row in combined_df.iterrows():
+        text = str(row.get("text", "")).strip()
+        if not text:
+            continue
+
+        doc_id = hashlib.sha1(f"csv_row_{i}_{time.time_ns()}".encode()).hexdigest()
+        norm = normalize_text(text)
+
+        meta = {
+            "language": "en",
+            "filesize": len(text.encode("utf-8")),
+        }
+
+        sqlite_store.upsert_document(
+            doc_id=doc_id,
+            raw_text=text,
+            normalized_text=norm,
+            meta=meta,
+        )
+
+        mtime_ns = time.time_ns()
+        sqlite_store.add_file_mapping(doc_id, fake_path, mtime_ns)
+
+    print("Imported 2000 CSV rows into database.")
 
 if __name__ == "__main__":
     main()

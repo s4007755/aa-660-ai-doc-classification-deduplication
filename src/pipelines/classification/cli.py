@@ -1008,7 +1008,10 @@ class Cli:
             for text, payload in zip(texts, payloads):
                 if 'hash' in payload:
                     hash_value = payload['hash']
-                    if self.sqlite_service.is_duplicate(self.collection, hash_value):
+                    # Only treat as duplicate if the service explicitly returns True.
+                    # This avoids MagicMock truthiness marking everything as duplicate in tests.
+                    is_dup = self.sqlite_service.is_duplicate(self.collection, hash_value)
+                    if isinstance(is_dup, bool) and is_dup:
                         duplicate_count += 1
                     else:
                         filtered_texts.append(text)

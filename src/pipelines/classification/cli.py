@@ -251,14 +251,38 @@ class Cli:
             
             # Update collection metadata with clustering information
             num_clusters = len(set(cluster_labels))
-            self.qdrant_service.update_collection_metadata(
-                self.collection,
-                {
-                    "clustering_algorithm": algorithm,
-                    "num_clusters": int(num_clusters),
-                    "clustered_at": datetime.now().isoformat()
-                }
-            )
+            # Prepare clusters summary for fast API usage
+            try:
+                clusters_summary = {}
+                for cid, ids in cluster_to_point_ids.items():
+                    if cid == -1:
+                        continue
+                    name = cluster_names.get(cid, f"Cluster_{cid}")
+                    clusters_summary[str(int(cid))] = {
+                        "cluster_id": int(cid),
+                        "cluster_name": str(name),
+                        "count": int(len(ids))
+                    }
+                self.qdrant_service.update_collection_metadata(
+                    self.collection,
+                    {
+                        "clustering_algorithm": algorithm,
+                        "num_clusters": int(num_clusters),
+                        "clustered_at": datetime.now().isoformat(),
+                        "clusters_summary": clusters_summary
+                    }
+                )
+            except Exception as meta_err:
+                # Fallback to minimal metadata if summary fails
+                self.qdrant_service.update_collection_metadata(
+                    self.collection,
+                    {
+                        "clustering_algorithm": algorithm,
+                        "num_clusters": int(num_clusters),
+                        "clustered_at": datetime.now().isoformat()
+                    }
+                )
+                self.log(f"Warning: failed to write clusters summary: {meta_err}", True)
             
             self.log(f"Clustering completed! Found {num_clusters} clusters.")
             
@@ -358,7 +382,35 @@ class Cli:
             
             stored_labels = result["labels"]
             
-            # Get inferred labels from classified documents
+            # Try labels summary from collection metadata first
+            inferred = {}
+            try:
+                coll_metadata = self.qdrant_service.get_collection_metadata(self.collection)
+                labels_summary = coll_metadata.get('labels_summary') if coll_metadata else None
+                total_docs_meta = coll_metadata.get('total_documents') if coll_metadata else None
+                if labels_summary and isinstance(labels_summary, dict) and len(labels_summary) > 0:
+                    # Use cached summary
+                    self.console.print(f"\n[bold cyan]Inferred Labels (cached summary):[/bold cyan] [yellow]{self.collection}[/yellow]")
+                    self.console.print(f"[dim]{self._hr()}[/dim]")
+                    label_table = Table(show_header=True, box=None, padding=(0, 2))
+                    label_table.add_column("Label Name", style="blue")
+                    label_table.add_column("Documents", style="green", justify="right")
+                    label_table.add_column("Percentage", style="cyan", justify="right")
+                    total_for_pct = total_docs_meta or total_points or 1
+                    for name, count in sorted(labels_summary.items(), key=lambda x: (-x[1], x[0])):
+                        percentage = (count / total_for_pct) * 100
+                        label_table.add_row(name, f"{int(count):,}", f"{percentage:.1f}%")
+                    self.console.print(label_table)
+                    self.console.print(f"\n[dim]Total: {len(labels_summary)} inferred labels[/dim]")
+                    if not stored_labels:
+                        self.console.print("[dim]Store labels explicitly via: enrich-labels --store-in-collection or add-label[/dim]")
+                    self.console.print()
+                    return
+            except Exception:
+                # Ignore summary errors and fall back to scan
+                pass
+
+            # Fallback: scan to infer labels
             self.console.print(f"\n[dim]Scanning {total_points} documents for labels...[/dim]")
             inferred = self._scan_inferred_labels(total_points)
             
@@ -434,7 +486,35 @@ class Cli:
                 self.console.print(f"\n[yellow]No vectors in collection '{self.collection}'[/yellow]")
                 return
             
-            # Scan all points to collect cluster information
+            # Prefer clusters summary from collection metadata
+            try:
+                coll_metadata = self.qdrant_service.get_collection_metadata(self.collection)
+                clusters_summary = coll_metadata.get('clusters_summary') if coll_metadata else None
+                if clusters_summary and isinstance(clusters_summary, dict) and len(clusters_summary) > 0:
+                    self.console.print(f"\n[bold cyan]Clusters in Collection (cached summary):[/bold cyan] [yellow]{self.collection}[/yellow]")
+                    self.console.print(f"[dim]{self._hr()}[/dim]")
+                    cluster_table = Table(show_header=True, box=None, padding=(0, 2))
+                    cluster_table.add_column("Cluster ID", style="yellow", justify="center")
+                    cluster_table.add_column("Cluster Name", style="magenta")
+                    cluster_table.add_column("Documents", style="green", justify="right")
+                    cluster_table.add_column("Percentage", style="cyan", justify="right")
+                    # Compute total from summary
+                    total_from_summary = sum(int(v.get('count', 0)) for v in clusters_summary.values()) or max(1, total_points)
+                    for key, v in sorted(clusters_summary.items(), key=lambda x: int(x[0])):
+                        cid = int(v.get('cluster_id', int(key)))
+                        cname = str(v.get('cluster_name', f'Cluster_{cid}'))
+                        cnt = int(v.get('count', 0))
+                        pct = (cnt / total_from_summary) * 100
+                        cluster_table.add_row(str(cid), cname, f"{cnt:,}", f"{pct:.1f}%")
+                    self.console.print(cluster_table)
+                    self.console.print(f"\n[dim]Total: {len(clusters_summary)} clusters[/dim]")
+                    self.console.print(f"[dim]Query a cluster with: query cluster:0 or query cluster:ClusterName[/dim]\n")
+                    return
+            except Exception:
+                # Ignore and fall back
+                pass
+
+            # Fallback: scan all points to collect cluster information
             self.console.print(f"\n[dim]Scanning {total_points} documents for clusters...[/dim]")
             cluster_counts = self._scan_clusters()
             

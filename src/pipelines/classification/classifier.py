@@ -17,6 +17,7 @@ from qdrant_client.models import PointStruct
 from src.utils.embedding import embed
 from src.utils.hash_utils import HashUtils
 import openai
+from datetime import datetime
 
 
 class DocumentClassifier:
@@ -208,6 +209,41 @@ class DocumentClassifier:
             
             self.log(f"Classification completed! Classified {classified_count} documents.")
             
+            # Update collection metadata with labels summary (cache for API)
+            try:
+                label_counts: dict[str, int] = {}
+                page_offset = None
+                while True:
+                    points_page, page_offset = self.qdrant_service.scroll_vectors(
+                        collection_name,
+                        10000,
+                        with_payload=True,
+                        with_vectors=False,
+                        page_offset=page_offset
+                    )
+                    if not points_page:
+                        break
+                    for p in points_page:
+                        payload = p.get('payload', {}) or {}
+                        if payload.get('_metadata'):
+                            continue
+                        label = payload.get('predicted_label')
+                        if label:
+                            label_counts[label] = label_counts.get(label, 0) + 1
+                    if not page_offset:
+                        break
+
+                self.qdrant_service.update_collection_metadata(
+                    collection_name,
+                    {
+                        "labels_summary": label_counts,
+                        "labels_summary_updated_at": datetime.now().isoformat(),
+                        "total_documents": len(data_points),
+                    }
+                )
+            except Exception as meta_err:
+                self.log(f"Warning: failed to update labels summary in metadata: {meta_err}", True)
+
             return {
                 "success": True,
                 "classified_count": classified_count,

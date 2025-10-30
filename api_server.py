@@ -365,36 +365,64 @@ async def get_point_by_id(collection_name: str, point_id: int):
         raise HTTPException(status_code=500, detail=f"Failed to get point: {str(e)}")
 
 @app.get("/collections/{collection_name}/labels")
-async def get_all_labels(collection_name: str):
-    """Get all unique labels in a collection."""
+async def get_all_labels(
+    collection_name: str,
+    limit: int = Query(1000, ge=1, le=MAX_SCROLL_LIMIT, description="Page size for label aggregation"),
+    page_offset: Optional[str] = Query(None, description="Opaque paging cursor from previous call"),
+    use_cache: bool = Query(True, description="Use labels summary from metadata when available")
+):
+    """Get labels with per-page aggregation.
+
+    Returns label bucket counts for a single page of points, plus next_offset for iteration.
+    """
     try:
         # Check if collection exists using cache
         collections = get_cached_collections()
         if collection_name not in collections:
             raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found")
-        
-        # Get all points to count labels
-        points, _ = qdrant_service.scroll_vectors(
+
+        # If cache requested and available, return full summary (no paging)
+        if use_cache:
+            try:
+                metadata = qdrant_service.get_collection_metadata(collection_name)
+                if metadata and metadata.get("labels_summary"):
+                    label_counts = metadata.get("labels_summary") or {}
+                    labels = [LabelInfo(label=label, count=count) for label, count in sorted(label_counts.items())]
+                    return {
+                        "collection": collection_name,
+                        "labels": labels,
+                        "total_labels": len(labels),
+                        "source": "metadata",
+                        "next_offset": None
+                    }
+            except Exception:
+                pass
+
+        # Fetch one page of points (per-page aggregation)
+        points, next_offset = qdrant_service.scroll_vectors(
             collection_name,
-            limit=MAX_SCROLL_LIMIT,  # Get all points for accurate counts
+            limit=limit,
             with_payload=True,
-            with_vectors=False
+            with_vectors=False,
+            page_offset=page_offset
         )
-        
-        # Count labels
-        label_counts = {}
+
+        # Aggregate labels for this page
+        label_counts: Dict[str, int] = {}
         for point in points:
             payload = point.get('payload', {})
             label = payload.get('predicted_label')
             if label:
                 label_counts[label] = label_counts.get(label, 0) + 1
-        
+
         labels = [LabelInfo(label=label, count=count) for label, count in sorted(label_counts.items())]
-        
+
         return {
             "collection": collection_name,
             "labels": labels,
-            "total_labels": len(labels)
+            "page_size": limit,
+            "returned": len(points),
+            "next_offset": next_offset
         }
     except HTTPException:
         raise
@@ -452,41 +480,77 @@ async def get_points_by_label(
         raise HTTPException(status_code=500, detail=f"Failed to get points by label: {str(e)}")
 
 @app.get("/collections/{collection_name}/clusters")
-async def get_all_clusters(collection_name: str):
-    """Get all clusters in a collection."""
+async def get_all_clusters(
+    collection_name: str,
+    limit: int = Query(1000, ge=1, le=MAX_SCROLL_LIMIT, description="Page size for cluster aggregation"),
+    page_offset: Optional[str] = Query(None, description="Opaque paging cursor from previous call"),
+    use_cache: bool = Query(True, description="Use clusters summary from metadata when available")
+):
+    """Get clusters with per-page aggregation.
+
+    Returns cluster bucket counts for a single page of points, plus next_offset for iteration.
+    """
     try:
         # Check if collection exists using cache
         collections = get_cached_collections()
         if collection_name not in collections:
             raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found")
-        
-        # Get all points to count clusters
-        points, _ = qdrant_service.scroll_vectors(
+
+        # If cache requested and available, return full summary (no paging)
+        if use_cache:
+            try:
+                metadata = qdrant_service.get_collection_metadata(collection_name)
+                if metadata and metadata.get("clusters_summary"):
+                    summary = metadata.get("clusters_summary") or {}
+                    clusters = [
+                        ClusterInfo(
+                            cluster_id=int(v.get("cluster_id", int(k))),
+                            cluster_name=str(v.get("cluster_name", f"Cluster_{k}")),
+                            count=int(v.get("count", 0))
+                        )
+                        for k, v in sorted(summary.items(), key=lambda x: int(x[0]))
+                    ]
+                    return {
+                        "collection": collection_name,
+                        "clusters": clusters,
+                        "total_clusters": len(clusters),
+                        "source": "metadata",
+                        "next_offset": None
+                    }
+            except Exception:
+                pass
+
+        # Fetch one page of points (per-page aggregation)
+        points, next_offset = qdrant_service.scroll_vectors(
             collection_name,
-            limit=MAX_SCROLL_LIMIT,  # Get all points for accurate counts
+            limit=limit,
             with_payload=True,
-            with_vectors=False
+            with_vectors=False,
+            page_offset=page_offset
         )
-        
-        # Count clusters
-        cluster_counts = {}
+
+        # Aggregate clusters for this page
+        cluster_counts: Dict[tuple[int, str], int] = {}
         for point in points:
             payload = point.get('payload', {})
             cluster_id = payload.get('cluster_id')
+            if cluster_id is None:
+                continue
             cluster_name = payload.get('cluster_name', f'Cluster_{cluster_id}')
-            if cluster_id is not None:
-                key = (cluster_id, cluster_name)
-                cluster_counts[key] = cluster_counts.get(key, 0) + 1
-        
+            key = (int(cluster_id), str(cluster_name))
+            cluster_counts[key] = cluster_counts.get(key, 0) + 1
+
         clusters = [
-            ClusterInfo(cluster_id=cid, cluster_name=cname, count=count) 
+            ClusterInfo(cluster_id=cid, cluster_name=cname, count=count)
             for (cid, cname), count in sorted(cluster_counts.items())
         ]
-        
+
         return {
             "collection": collection_name,
             "clusters": clusters,
-            "total_clusters": len(clusters)
+            "page_size": limit,
+            "returned": len(points),
+            "next_offset": next_offset
         }
     except HTTPException:
         raise

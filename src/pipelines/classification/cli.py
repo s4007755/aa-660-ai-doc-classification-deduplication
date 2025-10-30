@@ -1245,18 +1245,20 @@ class Cli:
             except ValueError as e:
                 self.log(f"Invalid rm-label arguments: {e}. Usage: rm-label <label_id|label_name> [--by id|name] [--yes]", True)
 
-        elif cmd == "list-labels":
+        elif cmd in ("ls-labels", "list-labels"):
             if self.collection is None:
                 self.log("No collection selected.", True)
                 return
-            
+            if cmd == "list-labels":
+                self.log("'list-labels' is deprecated. Use 'ls-labels' instead.")
             self._list_labels_command()
 
-        elif cmd == "list-clusters":
+        elif cmd in ("ls-clusters", "list-clusters"):
             if self.collection is None:
                 self.log("No collection selected.", True)
                 return
-            
+            if cmd == "list-clusters":
+                self.log("'list-clusters' is deprecated. Use 'ls-clusters' instead.")
             self._list_clusters_command()
 
         elif cmd == "help":
@@ -1290,8 +1292,8 @@ class Cli:
             help_table.add_row(f"  [green]classify[/green] [cyan]<labels.json>[/cyan] [cyan]{escape('[--use-collection-labels]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Assign labels")
             help_table.add_row(f"  [green]add-label[/green] [cyan]<label>[/cyan] [cyan]{escape('[--description]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Store label point")
             help_table.add_row(f"  [green]rm-label[/green] [cyan]<label|label_id>[/cyan] [cyan]{escape('[--by]')}[/cyan] [cyan]{escape('[--yes]')}[/cyan]", "Remove label points")
-            help_table.add_row("  [green]list-labels[/green]", "Show labels (stored/inferred)")
-            help_table.add_row("  [green]list-clusters[/green]", "Show all clusters")
+            help_table.add_row("  [green]ls-labels[/green]", "Show labels (stored/inferred)")
+            help_table.add_row("  [green]ls-clusters[/green]", "Show all clusters")
             
             # System
             help_table.add_row("[bold magenta]System[/bold magenta]", "")

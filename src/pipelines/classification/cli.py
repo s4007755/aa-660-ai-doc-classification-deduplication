@@ -317,18 +317,24 @@ class Cli:
                     print()
                 return
             
-            # Fallback: infer label names from document payloads (predicted_label)
-            points_list, _ = self.qdrant_service.scroll_vectors(
-                self.collection, 10000, with_payload=True, with_vectors=False
-            )
+            # Fallback: infer label names from document payloads (predicted_label) with pagination
             inferred = {}
-            for p in points_list:
-                payload = p.get('payload', {}) or {}
-                if payload.get('_metadata'):
-                    continue
-                label = payload.get('predicted_label')
-                if label:
-                    inferred[label] = inferred.get(label, 0) + 1
+            page_offset = None
+            while True:
+                points_list, page_offset = self.qdrant_service.scroll_vectors(
+                    self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
+                )
+                if not points_list:
+                    break
+                for p in points_list:
+                    payload = p.get('payload', {}) or {}
+                    if payload.get('_metadata'):
+                        continue
+                    label = payload.get('predicted_label')
+                    if label:
+                        inferred[label] = inferred.get(label, 0) + 1
+                if not page_offset:
+                    break
             if inferred:
                 print(f"\n=== Inferred Labels (from predicted_label) in {self.collection} ===")
                 for name, count in sorted(inferred.items(), key=lambda x: (-x[1], x[0])):

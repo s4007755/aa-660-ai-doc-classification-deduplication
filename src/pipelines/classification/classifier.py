@@ -48,11 +48,23 @@ class DocumentClassifier:
                 return int(self.qdrant_service._reserve_id_block(collection_name, count))
             except Exception:
                 pass
-        # Fallback: compute next id from collection stats (best-effort)
+        # Fallback: find max existing ID (best-effort) to avoid collisions
         try:
-            info = self.qdrant_service.client.get_collection(collection_name)
-            # points_count includes metadata id 0; next id is points_count + 1
-            return int(info.points_count) + 1
+            client = self.qdrant_service.client
+            info = client.get_collection(collection_name)
+            limit = min(max(int(getattr(info, 'points_count', 0)) * 2, 1000), 20000)
+            try:
+                points, _ = client.scroll(collection_name=collection_name, limit=limit, with_payload=False, with_vectors=False)
+                max_id = 0
+                for p in points or []:
+                    try:
+                        max_id = max(max_id, int(getattr(p, 'id', 0)))
+                    except Exception:
+                        continue
+                return max_id + 1
+            except Exception:
+                # Last resort: points_count + 1
+                return int(getattr(info, 'points_count', 0)) + 1
         except Exception:
             return 1
 

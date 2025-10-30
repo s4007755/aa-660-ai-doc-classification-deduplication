@@ -423,13 +423,15 @@ class QdrantService:
             filtered_vectors = []
             filtered_payloads = []
             duplicate_hashes = []
-            
+
             if sqlite_service:
                 self.log("Checking for duplicates using SQLite hash index...")
                 for vec, payload in zip(vectors, payloads):
                     if 'hash' in payload:
                         hash_value = payload['hash']
-                        if sqlite_service.is_duplicate(collection_name, hash_value):
+                        dup = sqlite_service.is_duplicate(collection_name, hash_value)
+                        # Only treat as duplicate when the service explicitly returns True
+                        if isinstance(dup, bool) and dup:
                             duplicate_hashes.append(hash_value)
                         else:
                             filtered_vectors.append(vec)

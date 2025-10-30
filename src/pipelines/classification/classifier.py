@@ -9,12 +9,14 @@ This module provides comprehensive document classification functionality includi
 """
 
 import json
+import os
 from typing import List
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
+from qdrant_client.models import PointStruct
 from src.utils.embedding import embed
 from src.utils.hash_utils import HashUtils
+from openai import OpenAI
 
 
 class DocumentClassifier:
@@ -326,17 +328,13 @@ class DocumentClassifier:
     def _enrich_labels_data(self, labels_data):
         """Enrich labels with AI-generated descriptions."""
         try:
-            from openai import OpenAI
-            
             # Try to import API key with proper error handling
             try:
                 from src.pipelines.classification.credentials import OPENAI_API_KEY
             except ImportError:
-                import os
                 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             except Exception as e:
                 self.log(f"Warning: Could not load credentials file: {e}", True)
-                import os
                 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":
@@ -380,17 +378,13 @@ class DocumentClassifier:
     def _generate_label_description(self, label_name, existing_desc=""):
         """Generate AI description for a label."""
         try:
-            from openai import OpenAI
-            
             # Try to import API key with proper error handling
             try:
                 from src.pipelines.classification.credentials import OPENAI_API_KEY
             except ImportError:
-                import os
                 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             except Exception as e:
                 self.log(f"Warning: Could not load credentials file: {e}", True)
-                import os
                 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":

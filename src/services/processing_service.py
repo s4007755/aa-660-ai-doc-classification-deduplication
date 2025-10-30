@@ -8,6 +8,7 @@ Provides document ingestion, CSV processing, and file operations.
 from typing import List, Dict, Any, Optional, Tuple
 import os
 import csv
+import json
 import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -582,8 +583,6 @@ class ProcessingService:
             True if successful, False otherwise
         """
         try:
-            import json
-            
             data = {
                 "texts": texts,
                 "payloads": payloads,

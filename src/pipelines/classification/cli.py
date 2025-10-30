@@ -4,15 +4,17 @@ from src.services.processing_service import ProcessingService
 from src.services.sqlite_service import SQLiteService
 from src.pipelines.classification.classifier import DocumentClassifier
 from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.markup import escape
 from datetime import datetime
 import argparse
 import json
 import numpy as np
-from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
-from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, PointStruct
-from src.utils.hash_utils import HashUtils
 import shutil
+import traceback
+from sklearn.cluster import KMeans, AgglomerativeClustering
+from sklearn.metrics.pairwise import euclidean_distances, cosine_distances
 
 # Constants
 CLUSTER_REPRESENTATIVE_LIMIT = 25  # Number of docs per cluster
@@ -167,7 +169,6 @@ class Cli:
                 
                 # Calculate optimal distance threshold based on data size
                 # For embeddings, cosine distance works better than euclidean
-                from sklearn.metrics.pairwise import cosine_distances
                 sample_size = min(1000, len(vectors))
                 sample_vectors = vectors[:sample_size]
                 distances = cosine_distances(sample_vectors)
@@ -341,8 +342,6 @@ class Cli:
     def _list_labels_command(self):
         """List both stored and inferred labels in the collection."""
         try:
-            from rich.table import Table
-            
             # Get collection info
             collection_info = self.qdrant_service.get_collection_info(self.collection)
             total_points = collection_info['vector_count']
@@ -427,8 +426,6 @@ class Cli:
     def _list_clusters_command(self):
         """List all clusters in the collection."""
         try:
-            from rich.table import Table
-            
             # Get collection info
             collection_info = self.qdrant_service.get_collection_info(self.collection)
             total_points = collection_info['vector_count']
@@ -577,9 +574,6 @@ class Cli:
             # Get collection info using QdrantService
             collection_info = self.qdrant_service.get_collection_info(self.collection)
             
-            from rich.table import Table
-            from rich.panel import Panel
-            
             # Collection overview
             self.console.print(f"\n[bold cyan]Collection Statistics:[/bold cyan] [yellow]{self.collection}[/yellow]")
             self.console.print(f"[dim]{self._hr()}[/dim]")
@@ -624,7 +618,6 @@ class Cli:
             # Show creation date if available
             if collection_info.get('created_at'):
                 try:
-                    from datetime import datetime
                     dt = datetime.fromisoformat(collection_info['created_at'])
                     created_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                     info_table.add_row("Created", created_str)
@@ -801,8 +794,6 @@ class Cli:
             self._use(args[0])
 
         elif cmd == "show":
-            from rich.table import Table
-            
             self.console.print()
             status_table = Table(show_header=False, box=None, padding=(0, 2))
             status_table.add_column("Property", style="dim")
@@ -824,8 +815,6 @@ class Cli:
             collections = self.qdrant_service.list_collections()
             
             if collections:
-                from rich.table import Table
-                
                 self.console.print(f"\n[bold cyan]Available Collections[/bold cyan] [dim]({len(collections)} total)[/dim]")
                 self.console.print(f"[dim]{self._hr()}[/dim]")
                 
@@ -848,7 +837,6 @@ class Cli:
                     # Format creation date
                     if created_at:
                         try:
-                            from datetime import datetime
                             dt = datetime.fromisoformat(created_at)
                             created_str = dt.strftime("%Y-%m-%d %H:%M")
                         except:
@@ -879,13 +867,12 @@ class Cli:
 
         elif cmd == "ls-models":
             # Show available embedding models and dimensions
-            from rich.table import Table as RichTable
             model_dims = {
                 "text-embedding-3-small": 1536,
                 "text-embedding-3-large": 3072,
                 "text-embedding-ada-002": 1536
             }
-            t = RichTable(show_header=True, box=None, padding=(0, 2))
+            t = Table(show_header=True, box=None, padding=(0, 2))
             t.add_column("Model", style="yellow")
             t.add_column("Dimension", style="cyan", justify="right")
             for m, d in model_dims.items():
@@ -1149,9 +1136,6 @@ class Cli:
             self._list_clusters_command()
 
         elif cmd == "help":
-            from rich.table import Table
-            from rich.markup import escape
-            
             self.console.print("\n[bold cyan]Available Commands[/bold cyan]")
             self.console.print(f"[dim]{self._hr()}[/dim]")
             
@@ -1194,8 +1178,7 @@ class Cli:
             self.console.print(help_table)
             
             self.console.print("\n[dim]Query Examples:[/dim]")
-            from rich.table import Table as RichTable
-            examples = RichTable(show_header=False, box=None, padding=(0, 2))
+            examples = Table(show_header=False, box=None, padding=(0, 2))
             examples.add_column("Command", style="green", no_wrap=True)
             examples.add_column("Comment", style="dim")
             examples.add_row("query cluster:0", "# Get all docs in cluster 0")
@@ -1293,7 +1276,6 @@ class Cli:
 
         except Exception as e:
             self.log(f"Source command failed: {e}", True)
-            import traceback
             self.log(f"Full traceback: {traceback.format_exc()}", True)
 
 if __name__ == "__main__":

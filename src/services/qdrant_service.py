@@ -9,7 +9,6 @@ from typing import List, Dict, Any, Optional, Tuple
 import threading
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
-from src.core import Collection, DistanceMetric
 
 
 class QdrantService:

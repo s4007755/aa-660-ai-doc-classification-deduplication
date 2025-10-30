@@ -7,8 +7,9 @@ Provides embedding generation, LLM operations, and AI-powered features.
 
 from typing import List, Dict, Any, Optional
 import os
-from src.utils.hash_utils import HashUtils
 import json
+from openai import OpenAI
+from tiktoken import encoding_for_model
 
 
 class OpenAIService:
@@ -44,7 +45,6 @@ class OpenAIService:
             
         # Initialize OpenAI client
         try:
-            from openai import OpenAI
             self.client = OpenAI(
                 api_key=self.api_key,
                 timeout=15.0,  # Reduced default timeout for all requests
@@ -80,8 +80,6 @@ class OpenAIService:
 
         try:
             # Use tiktoken for accurate token counting
-            from tiktoken import encoding_for_model
-
             # Model-specific token limits per individual text
             model_token_limits = {
                 "text-embedding-3-small": 8191,

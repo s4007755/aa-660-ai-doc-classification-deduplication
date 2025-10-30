@@ -775,6 +775,24 @@ class Cli:
                 self.console.print("\n[yellow]No collections found[/yellow]")
                 self.console.print("[dim]Create a collection with:[/dim] [green]create <name>[/green]\n")
 
+        elif cmd == "ls-models":
+            # Show available embedding models and dimensions
+            from rich.table import Table as RichTable
+            model_dims = {
+                "text-embedding-3-small": 1536,
+                "text-embedding-3-large": 3072,
+                "text-embedding-ada-002": 1536
+            }
+            t = RichTable(show_header=True, box=None, padding=(0, 2))
+            t.add_column("Model", style="yellow")
+            t.add_column("Dimension", style="cyan", justify="right")
+            for m, d in model_dims.items():
+                t.add_row(m, str(d))
+            self.console.print("\n[bold cyan]Embedding Models[/bold cyan]")
+            self.console.print(f"[dim]{self._hr()}[/dim]")
+            self.console.print(t)
+            self.console.print()
+
         elif cmd == "create":
             if not args:
                 self.log("Usage: create <collection_name> [model] [--description \"...\"]", True)
@@ -1023,6 +1041,7 @@ class Cli:
 
         elif cmd == "help":
             from rich.table import Table
+            from rich.markup import escape
             
             self.console.print("\n[bold cyan]Available Commands[/bold cyan]")
             self.console.print(f"[dim]{self._hr()}[/dim]")
@@ -1031,35 +1050,36 @@ class Cli:
             help_table.add_column("Command", style="green", no_wrap=True)
             help_table.add_column("Description", style="white")
             
-            # Collection management
-            help_table.add_row("[bold]Collection Management[/bold]", "")
-            help_table.add_row("  use <collection>", "Select a collection to work with")
-            help_table.add_row("  show", "Show current collection and connection status")
-            help_table.add_row("  ls", "List all available collections")
-            help_table.add_row("  create <name> [model] [-d]", "Create collection with optional model and description")
-            help_table.add_row("  rm [name] [--yes]", "Delete a collection and clear its SQLite hash index (with confirmation)")
+            # Collection
+            help_table.add_row("[bold magenta]Collection[/bold magenta]", "")
+            help_table.add_row("  [green]use[/green] [cyan]<collection>[/cyan]", "Select collection")
+            help_table.add_row("  [green]show[/green]", "Show status")
+            help_table.add_row("  [green]ls[/green]", "List collections")
+            help_table.add_row("  [green]ls-models[/green]", "List embedding models")
+            help_table.add_row(f"  [green]create[/green] [cyan]<name>[/cyan] [cyan]{escape('[model]')}[/cyan] [cyan]-d[/cyan]", "Create collection")
+            help_table.add_row(f"  [green]rm[/green] [cyan]{escape('[name]')}[/cyan] [cyan]{escape('[--yes]')}[/cyan]", "Remove collection + dedup index")
             
             # Data operations
             help_table.add_row("", "")
-            help_table.add_row("[bold]Data Operations[/bold]", "")
-            help_table.add_row("  source <path> [--limit N] [--text-column COL] [--url-column COL]", "Load and index data (deduplicates via SQLite; embeds with collection model)")
-            help_table.add_row("  query <query>", "Query by cluster:ID|Name, label:Name, URL, directory, or doc ID")
-            help_table.add_row("  stats", "Show detailed collection statistics")
+            help_table.add_row("[bold magenta]Data[/bold magenta]", "")
+            help_table.add_row(f"  [green]source[/green] [cyan]<path>[/cyan] [cyan]{escape('[--limit]')}[/cyan] [cyan]{escape('[--text-column]')}[/cyan] [cyan]{escape('[--url-column]')}[/cyan]", "Ingest data")
+            help_table.add_row("  [green]query[/green] [cyan]<query>[/cyan]", "Search (cluster/label/url/id)")
+            help_table.add_row("  [green]stats[/green]", "Collection stats")
             
             # Analysis
             help_table.add_row("", "")
-            help_table.add_row("[bold]Analysis & Clustering[/bold]", "")
-            help_table.add_row("  cluster [--num-clusters N] [--debug]", "Cluster documents; auto-names clusters from representative texts")
-            help_table.add_row("  classify <labels.json> [--use-collection-labels] [--enrich]", "Classify docs using labels; uses descriptions if present; --enrich augments labels at runtime")
-            help_table.add_row("  add-label <label> [--description TEXT] [--enrich]", "Add a label point; --enrich generates a description if none provided")
-            help_table.add_row("  rm-label <label|label_id> [--by id|name] [--yes]", "Remove stored label points by ID or name")
-            help_table.add_row("  list-labels", "List stored labels; falls back to inferred labels from predictions")
+            help_table.add_row("[bold magenta]Analysis[/bold magenta]", "")
+            help_table.add_row(f"  [green]cluster[/green] [cyan]{escape('[--num-clusters]')}[/cyan] [cyan]{escape('[--debug]')}[/cyan]", "Cluster + name")
+            help_table.add_row(f"  [green]classify[/green] [cyan]<labels.json>[/cyan] [cyan]{escape('[--use-collection-labels]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Assign labels")
+            help_table.add_row(f"  [green]add-label[/green] [cyan]<label>[/cyan] [cyan]{escape('[--description]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Store label point")
+            help_table.add_row(f"  [green]rm-label[/green] [cyan]<label|label_id>[/cyan] [cyan]{escape('[--by]')}[/cyan] [cyan]{escape('[--yes]')}[/cyan]", "Remove label points")
+            help_table.add_row("  [green]list-labels[/green]", "Show labels (stored/inferred)")
             
             # System
-            help_table.add_row("[bold]System[/bold]", "")
-            help_table.add_row("  retry [--host] [--port]", "Retry Qdrant connection with optional new host/port")
-            help_table.add_row("  help", "Show this help message")
-            help_table.add_row("  exit / quit", "Exit the CLI")
+            help_table.add_row("[bold magenta]System[/bold magenta]", "")
+            help_table.add_row(f"  [green]retry[/green] [cyan]{escape('[--host]')}[/cyan] [cyan]{escape('[--port]')}[/cyan]", "Reconnect")
+            help_table.add_row("  [green]help[/green]", "Show help")
+            help_table.add_row("  [green]exit[/green] / [green]quit[/green]", "Exit")
             
             self.console.print(help_table)
             
@@ -1071,7 +1091,6 @@ class Cli:
             examples.add_row("query cluster:0", "# Get all docs in cluster 0")
             examples.add_row("query cluster:Technology", "# Get all docs in Technology cluster")
             examples.add_row("query label:Sports", "# Get all docs with Sports label")
-            examples.add_row("query \"C:\\my_docs\"", "# Get all docs with source path")
             self.console.print(examples)
 
         elif cmd in ("exit", "quit"):

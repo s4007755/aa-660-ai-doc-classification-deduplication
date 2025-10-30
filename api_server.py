@@ -249,7 +249,7 @@ async def get_collection_info(collection_name: str):
 @app.get("/collections/{collection_name}/points")
 async def get_all_points(
     collection_name: str,
-    limit: int | None = Query(None, ge=1, le=MAX_SCROLL_LIMIT, description="Maximum number of points to return; if omitted, returns all"),
+    limit: Optional[int] = Query(None, ge=1, le=MAX_SCROLL_LIMIT, description="Maximum number of points to return; if omitted, returns all"),
     offset: int = Query(0, ge=0, description="Offset for pagination (used when limit is provided)"),
 ):
     """Get all points in a collection with their labels."""

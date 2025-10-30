@@ -743,9 +743,10 @@ class QdrantService:
                 self.log("Cannot delete points: not connected to Qdrant.", True)
                 return False
             
+            from qdrant_client import models
             self.client.delete(
                 collection_name=collection_name,
-                points_selector=point_ids
+                points_selector=models.PointIdsList(points=point_ids)
             )
             
             self.log(f"Deleted {len(point_ids)} points from collection '{collection_name}'")

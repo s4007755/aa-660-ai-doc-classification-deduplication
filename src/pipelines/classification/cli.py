@@ -117,10 +117,23 @@ class Cli:
             self.log(f"Retrieving vectors from collection...")
             self.log(f"Processing all {total_points} vectors for clustering...")
             
-            # Retrieve vectors using QdrantService - no limit, get all vectors
-            points_list, _ = self.qdrant_service.scroll_vectors(
-                self.collection, total_points, with_payload=True, with_vectors=True
-            )
+            # Retrieve all vectors with pagination to avoid service caps
+            points_list = []
+            page_offset = None
+            page_limit = 10000
+            while True:
+                page_points, page_offset = self.qdrant_service.scroll_vectors(
+                    self.collection,
+                    page_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                    page_offset=page_offset
+                )
+                if not page_points:
+                    break
+                points_list.extend(page_points)
+                if not page_offset:
+                    break
             
             if not points_list:
                 self.log("No vectors found in collection.", True)
@@ -593,11 +606,31 @@ class Cli:
                 )
             
             elif query.isdigit():
-                # Document ID query
-                points_list, _ = self.qdrant_service.scroll_vectors(
-                    self.collection, 1, with_payload=True, with_vectors=False,
-                    filter_conditions={"id": int(query)}
-                )
+                # Document ID query via direct retrieve with fallback to scroll
+                try:
+                    point = self.qdrant_service.client.retrieve(
+                        collection_name=self.collection,
+                        ids=[int(query)],
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    points_list = [{"id": p.id, "payload": p.payload} for p in point]
+                except Exception:
+                    # Fallback to scroll and filter in Python
+                    page_offset = None
+                    points_list = []
+                    while True:
+                        page_points, page_offset = self.qdrant_service.scroll_vectors(
+                            self.collection, 1000, with_payload=True, with_vectors=False, page_offset=page_offset
+                        )
+                        if not page_points:
+                            break
+                        for p in page_points:
+                            if int(p.get('id', -1)) == int(query):
+                                points_list = [p]
+                                break
+                        if points_list or not page_offset:
+                            break
             
             else:
                 # Free-text/source path queries are not supported
@@ -668,9 +701,17 @@ class Cli:
             doc_types = {}
             has_classifications = False
             if total_vectors > 0:
-                points_list, _ = self.qdrant_service.scroll_vectors(
-                    self.collection, total_vectors, with_payload=True, with_vectors=False
-                )
+                points_list = []
+                page_offset = None
+                while True:
+                    page_points, page_offset = self.qdrant_service.scroll_vectors(
+                        self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
+                    )
+                    if not page_points:
+                        break
+                    points_list.extend(page_points)
+                    if not page_offset:
+                        break
                 
                 # Document types and check for classifications
                 for point in points_list:
@@ -822,8 +863,8 @@ class Cli:
                         
                         if 'type' in payload:
                             text_content += f" (Type: {payload['type']})"
-                        if 'Label' in payload:
-                            text_content += f" (Label: {payload['Label']})"
+                        if 'predicted_label' in payload:
+                            text_content += f" (Label: {payload['predicted_label']})"
                         
                         if text_content:
                             representative_texts.append(text_content[:TEXT_PREVIEW_LIMIT])

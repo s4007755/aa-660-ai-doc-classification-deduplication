@@ -147,11 +147,24 @@ class DocumentClassifier:
             collection_info = self.qdrant_service.get_collection_info(collection_name)
             total_points = collection_info['vector_count']
             
-            # Process all vectors - use a large limit to ensure we get all points
+            # Process all vectors with pagination to avoid backend caps
             self.log(f"Retrieving all {total_points} vectors for classification...")
-            points_list, _ = self.qdrant_service.scroll_vectors(
-                collection_name, max(total_points * 2, 1000), with_payload=True, with_vectors=True
-            )
+            points_list = []
+            page_offset = None
+            page_limit = 10000
+            while True:
+                page_points, page_offset = self.qdrant_service.scroll_vectors(
+                    collection_name,
+                    page_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                    page_offset=page_offset
+                )
+                if not page_points:
+                    break
+                points_list.extend(page_points)
+                if not page_offset:
+                    break
             
             if not points_list:
                 return {"success": False, "error": "No vectors found in collection"}

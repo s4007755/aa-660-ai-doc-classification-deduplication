@@ -1028,18 +1028,18 @@ class Cli:
             # Data operations
             help_table.add_row("", "")
             help_table.add_row("[bold]Data Operations[/bold]", "")
-            help_table.add_row("  source <path> [options]", "Load data from directory, CSV, or URL")
-            help_table.add_row("  query <query>", "Query documents (supports cluster:ID, label:Name, paths)")
+            help_table.add_row("  source <path> [--limit N] [--text-column COL] [--url-column COL]", "Load and index data (deduplicates via SQLite; embeds with collection model)")
+            help_table.add_row("  query <query>", "Query by cluster:ID|Name, label:Name, URL, directory, or doc ID")
             help_table.add_row("  stats", "Show detailed collection statistics")
             
             # Analysis
             help_table.add_row("", "")
             help_table.add_row("[bold]Analysis & Clustering[/bold]", "")
-            help_table.add_row("  cluster [--num-clusters N]", "Cluster documents using K-means or unsupervised methods")
-            help_table.add_row("  classify <labels.json>", "Classify documents using predefined labels")
-            help_table.add_row("  add-label <label>", "Add a new classification label to collection")
-            help_table.add_row("  rm-label <label>", "Remove a classification label by id or name")
-            help_table.add_row("  list-labels", "List all labels in the collection")
+            help_table.add_row("  cluster [--num-clusters N] [--debug]", "Cluster documents; auto-names clusters from representative texts")
+            help_table.add_row("  classify <labels.json> [--use-collection-labels] [--enrich]", "Classify docs using labels; uses descriptions if present; --enrich augments labels at runtime")
+            help_table.add_row("  add-label <label> [--description TEXT] [--enrich]", "Add a label point; --enrich generates a description if none provided")
+            help_table.add_row("  rm-label <label|label_id> [--by id|name] [--yes]", "Remove stored label points by ID or name")
+            help_table.add_row("  list-labels", "List stored labels; falls back to inferred labels from predictions")
             
             # System
             help_table.add_row("", "")
@@ -1051,9 +1051,10 @@ class Cli:
             self.console.print(help_table)
             
             self.console.print("\n[dim]Query Examples:[/dim]")
-            self.console.print("  [green]query cluster:0[/green]           [dim]# Get all docs in cluster 0[/dim]")
-            self.console.print("  [green]query cluster:Technology[/green]  [dim]# Get all docs in Technology cluster[/dim]")
-            self.console.print("  [green]query label:Sports[/green]        [dim]# Get all docs with Sports label[/dim]")
+            self.console.print("  [green]query cluster:0[/green]                 [dim]# Get all docs in cluster 0[/dim]")
+            self.console.print("  [green]query cluster:Technology[/green]        [dim]# Get all docs in Technology cluster[/dim]")
+            self.console.print("  [green]query label:Sports[/green]              [dim]# Get all docs with Sports label[/dim]")
+            self.console.print("  [green]query \"C:\\my_docs\"[/green]            [dim]# Get all docs with source path[/dim]")
             self.console.print()
 
         elif cmd in ("exit", "quit"):

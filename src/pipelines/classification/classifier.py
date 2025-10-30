@@ -9,6 +9,7 @@ This module provides comprehensive document classification functionality includi
 """
 
 import json
+from typing import List
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
@@ -166,28 +167,43 @@ class DocumentClassifier:
             similarities = cosine_similarity(vectors, label_embeddings)
             predicted_indices = np.argmax(similarities, axis=1)
             
-            # Update vectors with classifications
+            # Update payloads in batches (each point has its own payload)
             classified_count = 0
+            batch_size = 1000
+            batched_ids: List[int] = []
+            batched_payloads: List[dict] = []
             for i, (point_id, pred_idx) in enumerate(zip(point_ids, predicted_indices)):
-                predicted_label = label_names[pred_idx]
-                predicted_label_id = label_ids[pred_idx]
-                confidence = similarities[i][pred_idx]
-                
-                success = self.qdrant_service.update_payload(
-                    collection_name=collection_name,
-                    point_ids=[point_id],
-                    payload={
-                        "predicted_label": predicted_label,
-                        "predicted_label_id": predicted_label_id,
-                        "confidence": float(confidence),
-                        "classification_method": "cosine_similarity"
-                    }
-                )
-                
-                if not success:
-                    self.log(f"Failed to update payload for point {point_id}", True)
-                    continue
-                classified_count += 1
+                batched_ids.append(point_id)
+                batched_payloads.append({
+                    "predicted_label": label_names[pred_idx],
+                    "predicted_label_id": label_ids[pred_idx],
+                    "confidence": float(similarities[i][pred_idx]),
+                    "classification_method": "cosine_similarity"
+                })
+                if len(batched_ids) >= batch_size:
+                    batch_method = getattr(type(self.qdrant_service), "update_payload_batch", None)
+                    if callable(batch_method):
+                        ok = self.qdrant_service.update_payload_batch(collection_name, batched_ids, batched_payloads)
+                        if ok:
+                            classified_count += len(batched_ids)
+                    else:
+                        # Fallback: sequential
+                        for pid, pl in zip(batched_ids, batched_payloads):
+                            if self.qdrant_service.update_payload(collection_name, [pid], pl):
+                                classified_count += 1
+                    batched_ids, batched_payloads = [], []
+
+            # Flush remainder
+            if batched_ids:
+                batch_method = getattr(type(self.qdrant_service), "update_payload_batch", None)
+                if callable(batch_method):
+                    ok = self.qdrant_service.update_payload_batch(collection_name, batched_ids, batched_payloads)
+                    if ok:
+                        classified_count += len(batched_ids)
+                else:
+                    for pid, pl in zip(batched_ids, batched_payloads):
+                        if self.qdrant_service.update_payload(collection_name, [pid], pl):
+                            classified_count += 1
             
             self.log(f"Classification completed! Classified {classified_count} documents.")
             

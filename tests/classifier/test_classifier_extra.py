@@ -53,7 +53,7 @@ class TestClassifierFailures:
 
     def test_add_label_without_enrich_empty_desc(self, clf):
         classifier, mock_q = clf
-        mock_q._get_next_id.return_value = 10
+        mock_q._reserve_id_block.return_value = 10
         with patch('src.pipelines.classification.classifier.embed', return_value=[[0.1]]):
             with patch.object(classifier, '_generate_label_description') as gen:
                 gen.return_value = 'GEN'
@@ -62,7 +62,7 @@ class TestClassifierFailures:
 
     def test_add_label_embed_failure(self, clf):
         classifier, mock_q = clf
-        mock_q._get_next_id.return_value = 10
+        mock_q._reserve_id_block.return_value = 10
         with patch('src.pipelines.classification.classifier.embed', return_value=None):
             res = classifier.add_label_to_collection('c', 'L', description='D')
         assert res['success'] is False

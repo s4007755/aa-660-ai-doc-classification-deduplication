@@ -257,8 +257,8 @@ class TestLabelManagement:
         """Test successfully adding label to collection."""
         classifier, mock_qdrant = mock_classifier
         
-        # Mock next ID
-        mock_qdrant._get_next_id.return_value = 100
+        # Mock next ID reservation
+        mock_qdrant._reserve_id_block.return_value = 100
         
         # Mock embedding
         with patch('src.pipelines.classification.classifier.embed') as mock_embed:
@@ -283,8 +283,8 @@ class TestLabelManagement:
         with patch.object(classifier, '_generate_label_description') as mock_gen_desc:
             mock_gen_desc.return_value = "Auto-generated description"
             
-            # Mock next ID
-            mock_qdrant._get_next_id.return_value = 100
+            # Mock next ID reservation
+            mock_qdrant._reserve_id_block.return_value = 100
             
             # Mock embedding
             with patch('src.pipelines.classification.classifier.embed') as mock_embed:
@@ -416,8 +416,8 @@ class TestLabelStorage:
             "2": {"label": "Technology", "description": "Tech content", "enriched": True}
         }
         
-        # Mock next ID
-        mock_qdrant._get_next_id.return_value = 100
+        # Mock next ID reservation
+        mock_qdrant._reserve_id_block.return_value = 100
         
         # Mock embedding
         with patch('src.pipelines.classification.classifier.embed') as mock_embed:
@@ -485,7 +485,7 @@ class TestConvenienceFunctions:
         from src.pipelines.classification.classifier import add_label_to_collection
         
         mock_qdrant = Mock()
-        mock_qdrant._get_next_id.return_value = 100
+        mock_qdrant._reserve_id_block.return_value = 100
         
         with patch('src.pipelines.classification.classifier.embed') as mock_embed:
             mock_embed.return_value = [[0.1] * 1536]

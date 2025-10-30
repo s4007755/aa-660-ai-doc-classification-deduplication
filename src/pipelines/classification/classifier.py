@@ -36,12 +36,6 @@ class DocumentClassifier:
         """Allocate point ID(s) using the available service method for compatibility.
         Returns the starting ID for the allocated range.
         """
-        # Prefer legacy single-ID API when tests/mock expect it
-        if count == 1 and hasattr(self.qdrant_service, "_get_next_id"):
-            try:
-                return int(self.qdrant_service._get_next_id(collection_name))
-            except Exception:
-                pass
         # Use modern block reservation if available
         if hasattr(self.qdrant_service, "_reserve_id_block"):
             try:

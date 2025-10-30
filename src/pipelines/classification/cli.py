@@ -302,7 +302,7 @@ class Cli:
             self.log(result["error"], True)
 
     def _list_labels_command(self):
-        """List all labels in the collection."""
+        """List labels stored in the collection; fall back to inferred labels if none stored."""
         result = self.classifier.get_collection_labels(self.collection)
         
         if result["success"]:
@@ -315,6 +315,25 @@ class Cli:
                         print(f"    Description: {label_data['description']}")
                     print(f"    Enriched: {label_data.get('enriched', False)}")
                     print()
+                return
+            
+            # Fallback: infer label names from document payloads (predicted_label)
+            points_list, _ = self.qdrant_service.scroll_vectors(
+                self.collection, 10000, with_payload=True, with_vectors=False
+            )
+            inferred = {}
+            for p in points_list:
+                payload = p.get('payload', {}) or {}
+                if payload.get('_metadata'):
+                    continue
+                label = payload.get('predicted_label')
+                if label:
+                    inferred[label] = inferred.get(label, 0) + 1
+            if inferred:
+                print(f"\n=== Inferred Labels (from predicted_label) in {self.collection} ===")
+                for name, count in sorted(inferred.items(), key=lambda x: (-x[1], x[0])):
+                    print(f"  {name}  (docs: {count})")
+                print("\n[dim]Note: store labels explicitly via enrich-labels --store-in-collection or add-label[/dim]")
             else:
                 print(f"No labels found in collection '{self.collection}'")
         else:

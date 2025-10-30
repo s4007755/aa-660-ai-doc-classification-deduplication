@@ -422,30 +422,33 @@ Return only the description, no additional text.
             self.log(f"Failed to store labels: {e}", True)
     
     def _load_labels_from_collection(self, collection_name):
-        """Load labels from collection."""
+        """Load labels from collection with pagination to ensure completeness."""
         try:
-            # Query for label points
-            points_list, _ = self.qdrant_service.scroll_vectors(
-                collection_name, 1000, with_payload=True, with_vectors=False,
-                filter_conditions={"type": "label"}
-            )
-            
-            if not points_list:
-                return {}
-            
             labels_data = {}
-            for point in points_list:
-                payload = point.get('payload', {})
-                label_id = payload.get('label_id')
-                if label_id:
-                    labels_data[label_id] = {
-                        'label': payload.get('label_name', ''),
-                        'description': payload.get('description', ''),
-                        'enriched': payload.get('enriched', False)
-                    }
-            
+            next_offset = None
+            while True:
+                points_list, next_offset = self.qdrant_service.scroll_vectors(
+                    collection_name,
+                    1000,
+                    with_payload=True,
+                    with_vectors=False,
+                    filter_conditions={"type": "label"},
+                    page_offset=next_offset
+                )
+                if not points_list:
+                    break
+                for point in points_list:
+                    payload = point.get('payload', {})
+                    label_id = payload.get('label_id')
+                    if label_id:
+                        labels_data[label_id] = {
+                            'label': payload.get('label_name', ''),
+                            'description': payload.get('description', ''),
+                            'enriched': payload.get('enriched', False)
+                        }
+                if not next_offset:
+                    break
             return labels_data
-            
         except Exception as e:
             self.log(f"Failed to load labels from collection: {e}", True)
             return {}

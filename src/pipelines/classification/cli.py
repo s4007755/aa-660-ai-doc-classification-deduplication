@@ -357,6 +357,77 @@ class Cli:
         else:
             self.log(result["error"], True)
 
+    def _list_clusters_command(self):
+        """List all clusters in the collection."""
+        try:
+            from rich.table import Table
+            
+            # Get collection info
+            collection_info = self.qdrant_service.get_collection_info(self.collection)
+            total_points = collection_info['vector_count']
+            
+            if total_points == 0:
+                self.console.print(f"\n[yellow]No vectors in collection '{self.collection}'[/yellow]")
+                return
+            
+            # Scan all points to collect cluster information
+            self.console.print(f"\n[dim]Scanning {total_points} documents for clusters...[/dim]")
+            cluster_counts = {}
+            page_offset = None
+            
+            while True:
+                points_list, page_offset = self.qdrant_service.scroll_vectors(
+                    self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
+                )
+                if not points_list:
+                    break
+                    
+                for point in points_list:
+                    payload = point.get('payload', {}) or {}
+                    if payload.get('_metadata'):
+                        continue
+                    
+                    cluster_id = payload.get('cluster_id')
+                    if cluster_id is not None:
+                        cluster_name = payload.get('cluster_name', f'Cluster_{cluster_id}')
+                        key = (cluster_id, cluster_name)
+                        cluster_counts[key] = cluster_counts.get(key, 0) + 1
+                
+                if not page_offset:
+                    break
+            
+            if not cluster_counts:
+                self.console.print(f"\n[yellow]No clusters found in collection '{self.collection}'[/yellow]")
+                self.console.print("[dim]Run 'cluster' command to create clusters[/dim]\n")
+                return
+            
+            # Display clusters
+            self.console.print(f"\n[bold cyan]Clusters in Collection:[/bold cyan] [yellow]{self.collection}[/yellow]")
+            self.console.print(f"[dim]{self._hr()}[/dim]")
+            
+            cluster_table = Table(show_header=True, box=None, padding=(0, 2))
+            cluster_table.add_column("Cluster ID", style="yellow", justify="center")
+            cluster_table.add_column("Cluster Name", style="magenta")
+            cluster_table.add_column("Documents", style="green", justify="right")
+            cluster_table.add_column("Percentage", style="cyan", justify="right")
+            
+            # Sort by cluster ID
+            for (cluster_id, cluster_name), count in sorted(cluster_counts.items()):
+                percentage = (count / total_points) * 100
+                cluster_table.add_row(
+                    str(cluster_id),
+                    cluster_name,
+                    f"{count:,}",
+                    f"{percentage:.1f}%"
+                )
+            
+            self.console.print(cluster_table)
+            self.console.print(f"\n[dim]Total: {len(cluster_counts)} clusters[/dim]")
+            self.console.print(f"[dim]Query a cluster with: query cluster:0 or query cluster:ClusterName[/dim]\n")
+            
+        except Exception as e:
+            self.log(f"List clusters failed: {e}", True)
+
     def _query_command(self, query, limit=MAX_QUERY_RESULTS):
         """Query documents by cluster, URL, directory, or docID."""
         try:
@@ -1039,6 +1110,13 @@ class Cli:
             
             self._list_labels_command()
 
+        elif cmd == "list-clusters":
+            if self.collection is None:
+                self.log("No collection selected.", True)
+                return
+            
+            self._list_clusters_command()
+
         elif cmd == "help":
             from rich.table import Table
             from rich.markup import escape
@@ -1070,6 +1148,7 @@ class Cli:
             help_table.add_row("", "")
             help_table.add_row("[bold magenta]Analysis[/bold magenta]", "")
             help_table.add_row(f"  [green]cluster[/green] [cyan]{escape('[--num-clusters]')}[/cyan] [cyan]{escape('[--debug]')}[/cyan]", "Cluster + name")
+            help_table.add_row("  [green]list-clusters[/green]", "Show all clusters")
             help_table.add_row(f"  [green]classify[/green] [cyan]<labels.json>[/cyan] [cyan]{escape('[--use-collection-labels]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Assign labels")
             help_table.add_row(f"  [green]add-label[/green] [cyan]<label>[/cyan] [cyan]{escape('[--description]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Store label point")
             help_table.add_row(f"  [green]rm-label[/green] [cyan]<label|label_id>[/cyan] [cyan]{escape('[--by]')}[/cyan] [cyan]{escape('[--yes]')}[/cyan]", "Remove label points")

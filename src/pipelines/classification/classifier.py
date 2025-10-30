@@ -168,10 +168,12 @@ class DocumentClassifier:
             predicted_indices = np.argmax(similarities, axis=1)
             
             # Update payloads in batches (each point has its own payload)
+            # Uses official batch_update_points API for speed
             classified_count = 0
             batch_size = 1000
             batched_ids: List[int] = []
             batched_payloads: List[dict] = []
+            
             for i, (point_id, pred_idx) in enumerate(zip(point_ids, predicted_indices)):
                 batched_ids.append(point_id)
                 batched_payloads.append({
@@ -180,30 +182,27 @@ class DocumentClassifier:
                     "confidence": float(similarities[i][pred_idx]),
                     "classification_method": "cosine_similarity"
                 })
+                
                 if len(batched_ids) >= batch_size:
-                    batch_method = getattr(type(self.qdrant_service), "update_payload_batch", None)
-                    if callable(batch_method):
-                        ok = self.qdrant_service.update_payload_batch(collection_name, batched_ids, batched_payloads)
-                        if ok:
-                            classified_count += len(batched_ids)
-                    else:
-                        # Fallback: sequential
-                        for pid, pl in zip(batched_ids, batched_payloads):
-                            if self.qdrant_service.update_payload(collection_name, [pid], pl):
-                                classified_count += 1
+                    ok, success_count = self.qdrant_service.update_payload_batch(
+                        collection_name, batched_ids, batched_payloads
+                    )
+                    classified_count += success_count
+                    if success_count < len(batched_ids):
+                        self.log(f"Warning: Only {success_count}/{len(batched_ids)} updates succeeded in this batch", True)
+                    self.log(f"Updated {classified_count}/{len(point_ids)} documents...")
                     batched_ids, batched_payloads = [], []
 
             # Flush remainder
             if batched_ids:
-                batch_method = getattr(type(self.qdrant_service), "update_payload_batch", None)
-                if callable(batch_method):
-                    ok = self.qdrant_service.update_payload_batch(collection_name, batched_ids, batched_payloads)
-                    if ok:
-                        classified_count += len(batched_ids)
-                else:
-                    for pid, pl in zip(batched_ids, batched_payloads):
-                        if self.qdrant_service.update_payload(collection_name, [pid], pl):
-                            classified_count += 1
+                ok, success_count = self.qdrant_service.update_payload_batch(
+                    collection_name, batched_ids, batched_payloads
+                )
+                classified_count += success_count
+                if success_count < len(batched_ids):
+                    self.log(f"Warning: Only {success_count}/{len(batched_ids)} updates succeeded in final batch", True)
+            
+            self.log(f"Updated {classified_count}/{len(point_ids)} documents.")
             
             self.log(f"Classification completed! Classified {classified_count} documents.")
             

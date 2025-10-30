@@ -925,6 +925,57 @@ class Cli:
             except ValueError as e:
                 self.log(f"Invalid add-label arguments: {e}. Usage: add-label <label> [--description]", True)
 
+        elif cmd == "rm-label":
+            if self.collection is None:
+                self.log("No collection selected.", True)
+                return
+            
+            parser = NoExitArgParser(prog="rm-label", add_help=False)
+            parser.add_argument("target", help="Label ID or label name to remove")
+            parser.add_argument("--by", choices=["id", "name"], help="Match by 'id' (label_id) or 'name' (label_name)")
+            parser.add_argument("--yes", "-y", action="store_true", help="Confirm deletion without prompt")
+            
+            try:
+                opts = parser.parse_args(args)
+                target = opts.target
+                match_by = opts.by
+                
+                # Auto-detect if not provided: treat strings starting with 'custom_' as IDs
+                if not match_by:
+                    match_by = "id" if target.startswith("custom_") else "name"
+                
+                if not opts.yes:
+                    confirm = input(f"This will delete label(s) by {match_by}='{target}' from collection '{self.collection}'. Type 'yes' to confirm: ").strip().lower()
+                    if confirm != "yes":
+                        self.log("Deletion cancelled.")
+                        return
+                
+                # Build filter conditions
+                filter_conditions = {"type": "label"}
+                if match_by == "id":
+                    filter_conditions["label_id"] = target
+                else:
+                    filter_conditions["label_name"] = target
+                
+                # Find label points
+                points_list, _ = self.qdrant_service.scroll_vectors(
+                    self.collection, 1000, with_payload=True, with_vectors=False,
+                    filter_conditions=filter_conditions
+                )
+                
+                if not points_list:
+                    self.log("No matching labels found.")
+                    return
+                
+                point_ids = [int(p["id"]) for p in points_list]
+                ok = self.qdrant_service.delete_points(self.collection, point_ids)
+                if ok:
+                    self.log(f"Deleted {len(point_ids)} label point(s) from collection '{self.collection}'")
+                else:
+                    self.log("Failed to delete label point(s).", True)
+            except ValueError as e:
+                self.log(f"Invalid rm-label arguments: {e}. Usage: rm-label <label_id|label_name> [--by id|name] [--yes]", True)
+
         elif cmd == "list-labels":
             if self.collection is None:
                 self.log("No collection selected.", True)
@@ -963,6 +1014,7 @@ class Cli:
             help_table.add_row("  cluster [--num-clusters N]", "Cluster documents using K-means or unsupervised methods")
             help_table.add_row("  classify <labels.json>", "Classify documents using predefined labels")
             help_table.add_row("  add-label <label>", "Add a new classification label to collection")
+            help_table.add_row("  rm-label <label>", "Remove a classification label by id or name")
             help_table.add_row("  list-labels", "List all labels in the collection")
             
             # System

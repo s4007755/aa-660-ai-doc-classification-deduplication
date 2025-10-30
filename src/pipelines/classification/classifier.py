@@ -227,9 +227,9 @@ class DocumentClassifier:
             if not embeddings:
                 return {"success": False, "error": "Failed to generate label embedding"}
             
-            # Get next available ID
+            # Reserve one ID for this label
             label_id = f"custom_{len(label_name)}_{HashUtils.generate_deterministic_seed(label_name, 1000)}"
-            point_id = self.qdrant_service._get_next_id(collection_name)
+            point_id = self.qdrant_service._reserve_id_block(collection_name, 1)
             
             # Create label metadata
             metadata = {
@@ -402,8 +402,8 @@ Return only the description, no additional text.
                 self.log("Failed to generate label embeddings.", True)
                 return
             
-            # Get next available IDs
-            start_id = self.qdrant_service._get_next_id(collection_name)
+            # Reserve a contiguous ID block for all labels
+            start_id = self.qdrant_service._reserve_id_block(collection_name, len(label_embeddings))
             
             # Create label points
             points = []

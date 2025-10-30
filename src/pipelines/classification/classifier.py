@@ -239,14 +239,12 @@ class DocumentClassifier:
             dict: Addition results
         """
         try:
-            # Determine description and enrichment flag
+            # Determine description and enrichment flag (opt-in enrichment)
             final_description = description
             enriched_flag = False
-            if not description:
-                # Always generate a description when none provided (for compatibility/tests)
+            if not description and enrich:
                 final_description = self._generate_label_description(label_name)
-                # Only mark as enriched if explicitly requested
-                enriched_flag = bool(enrich)
+                enriched_flag = True
             
             # Generate embedding for the label
             label_text = label_name

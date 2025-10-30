@@ -292,7 +292,8 @@ class TestLabelManagement:
                 
                 result = classifier.add_label_to_collection(
                     "test_collection",
-                    "NewLabel"
+                    "NewLabel",
+                    enrich=True
                 )
         
         assert result["success"] is True

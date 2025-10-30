@@ -652,11 +652,11 @@ class QdrantService:
             self.log(f"Failed to update payload: {e}", True)
             return False
 
-    def update_payload_batch(self, collection_name: str, point_ids: List[int], payloads: List[Dict[str, Any]]) -> bool:
+    def update_payload_batch(self, collection_name: str, point_ids: List[int], payloads: List[Dict[str, Any]]) -> Tuple[bool, int]:
         """
-        Batch update payloads where each point can have a different payload.
-
-        Tries to use Qdrant's update_batch API; falls back to per-point set_payload if unavailable.
+        Batch update payloads using Qdrant's official batch_update_points API.
+        
+        Uses micro-batches for optimal performance and reliability.
 
         Args:
             collection_name: Collection name
@@ -664,36 +664,69 @@ class QdrantService:
             payloads: List of payload dictionaries, one per point
 
         Returns:
-            True if all updates succeed, False otherwise
+            Tuple of (all_successful, successful_count)
         """
-        try:
-            if not self.connected:
-                self.log("Cannot update payload: not connected to Qdrant.", True)
-                return False
+        if not self.connected:
+            self.log("Cannot update payload: not connected to Qdrant.", True)
+            return False, 0
 
-            if len(point_ids) != len(payloads):
-                self.log("update_payload_batch: point_ids and payloads length mismatch", True)
-                return False
+        if len(point_ids) != len(payloads):
+            self.log("update_payload_batch: point_ids and payloads length mismatch", True)
+            return False, 0
 
-            try:
-                from qdrant_client.models import SetPayload
-                operations = [SetPayload(points=[pid], payload=pl) for pid, pl in zip(point_ids, payloads)]
-                self.client.update_batch(collection_name=collection_name, operations=operations)
-                self.log(f"Batch-updated payloads for {len(point_ids)} points in collection '{collection_name}'")
-                return True
-            except Exception as e:
-                self.log(f"update_batch unsupported or failed ({e}); falling back to sequential updates", True)
-                all_ok = True
-                for pid, pl in zip(point_ids, payloads):
-                    try:
-                        self.client.set_payload(collection_name=collection_name, payload=pl, points=[pid])
-                    except Exception as ie:
-                        all_ok = False
-                        self.log(f"Failed to update payload for point {pid}: {ie}", True)
-                return all_ok
-        except Exception as e:
-            self.log(f"Failed batch payload update: {e}", True)
-            return False
+        from qdrant_client import models
+        
+        successful_count = 0
+        max_retries = 2
+        micro_batch_size = 1000  # Process 1000 operations per batch
+        
+        # Process in micro-batches
+        for i in range(0, len(point_ids), micro_batch_size):
+            batch_ids = point_ids[i:i + micro_batch_size]
+            batch_payloads = payloads[i:i + micro_batch_size]
+            
+            # Create SetPayloadOperation objects
+            operations = [
+                models.SetPayloadOperation(
+                    set_payload=models.SetPayload(
+                        payload=pl,
+                        points=[pid]
+                    )
+                )
+                for pid, pl in zip(batch_ids, batch_payloads)
+            ]
+            
+            success = False
+            for attempt in range(max_retries):
+                try:
+                    # Use official batch_update_points API
+                    self.client.batch_update_points(
+                        collection_name=collection_name,
+                        update_operations=operations,
+                        wait=True
+                    )
+                    successful_count += len(batch_ids)
+                    success = True
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        self.log(f"Failed to update batch starting at index {i}: {e}", True)
+                        # Fallback to individual updates for this batch
+                        for pid, pl in zip(batch_ids, batch_payloads):
+                            try:
+                                self.client.set_payload(
+                                    collection_name=collection_name,
+                                    payload=pl,
+                                    points=[pid]
+                                )
+                                successful_count += 1
+                            except Exception:
+                                pass
+        
+        all_ok = (successful_count == len(point_ids))
+        return all_ok, successful_count
     
     def delete_points(self, collection_name: str, point_ids: List[int]) -> bool:
         """

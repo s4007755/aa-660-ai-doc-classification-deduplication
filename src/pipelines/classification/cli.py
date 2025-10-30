@@ -12,6 +12,7 @@ from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny, PointStruct
 from src.utils.hash_utils import HashUtils
+import shutil
 
 # Constants
 CLUSTER_REPRESENTATIVE_LIMIT = 25  # Number of representative docs per cluster
@@ -41,6 +42,17 @@ class Cli:
         self.collection = None
         self.host = host
         self.port = port
+
+    def _hr(self, pad: int = 0, char: str = "─") -> str:
+        """Return a horizontal rule scaled to the current terminal width.
+        pad reduces the number of characters to account for indentation.
+        """
+        try:
+            width = self.console.width or shutil.get_terminal_size((100, 24)).columns
+        except Exception:
+            width = 100
+        line_len = max(10, int(width) - max(0, int(pad)))
+        return char * line_len
 
     def run(self):
         print("Welcome to Document Classifier CLI. Type 'help' for commands.\n")
@@ -410,7 +422,7 @@ class Cli:
                 return
             
             self.console.print(f"\n[green]Found {len(points_list)} document(s)[/green]")
-            self.console.print("[dim]" + "─" * 100 + "[/dim]")
+            self.console.print(f"[dim]{self._hr()}[/dim]")
             
             for i, point in enumerate(points_list):
                 payload = point.get('payload', {})
@@ -442,7 +454,7 @@ class Cli:
                 if text_preview:
                     self.console.print(f"    [dim]Preview:[/dim] [white]{text_preview}[/white]")
                 
-                self.console.print("    [dim]" + "─" * 96 + "[/dim]")
+                self.console.print(f"    [dim]{self._hr(pad=4)}[/dim]")
                 
         except Exception as e:
             self.log(f"Query failed: {e}", True)
@@ -458,7 +470,7 @@ class Cli:
             
             # Collection overview
             self.console.print(f"\n[bold cyan]Collection Statistics:[/bold cyan] [yellow]{self.collection}[/yellow]")
-            self.console.print("[dim]" + "─" * 100 + "[/dim]")
+            self.console.print(f"[dim]{self._hr()}[/dim]")
             
             # Get ALL vectors for detailed stats (not just a sample)
             sample_limit = collection_info['vector_count']  # Process all vectors
@@ -717,7 +729,7 @@ class Cli:
                 from rich.table import Table
                 
                 self.console.print(f"\n[bold cyan]Available Collections[/bold cyan] [dim]({len(collections)} total)[/dim]")
-                self.console.print("[dim]" + "─" * 100 + "[/dim]")
+                self.console.print(f"[dim]{self._hr()}[/dim]")
                 
                 coll_table = Table(show_header=True, box=None, padding=(0, 2))
                 coll_table.add_column("Collection Name", style="yellow")
@@ -1017,7 +1029,7 @@ class Cli:
             from rich.table import Table
             
             self.console.print("\n[bold cyan]Available Commands[/bold cyan]")
-            self.console.print("[dim]" + "─" * 100 + "[/dim]")
+            self.console.print(f"[dim]{self._hr()}[/dim]")
             
             help_table = Table(show_header=True, box=None, padding=(0, 2), show_edge=False)
             help_table.add_column("Command", style="green", no_wrap=True)
@@ -1048,7 +1060,6 @@ class Cli:
             help_table.add_row("  list-labels", "List stored labels; falls back to inferred labels from predictions")
             
             # System
-            help_table.add_row("", "")
             help_table.add_row("[bold]System[/bold]", "")
             help_table.add_row("  retry [--host] [--port]", "Retry Qdrant connection with optional new host/port")
             help_table.add_row("  help", "Show this help message")
@@ -1057,11 +1068,15 @@ class Cli:
             self.console.print(help_table)
             
             self.console.print("\n[dim]Query Examples:[/dim]")
-            self.console.print("  [green]query cluster:0[/green]                 [dim]# Get all docs in cluster 0[/dim]")
-            self.console.print("  [green]query cluster:Technology[/green]        [dim]# Get all docs in Technology cluster[/dim]")
-            self.console.print("  [green]query label:Sports[/green]              [dim]# Get all docs with Sports label[/dim]")
-            self.console.print("  [green]query \"C:\\my_docs\"[/green]            [dim]# Get all docs with source path[/dim]")
-            self.console.print()
+            from rich.table import Table as RichTable
+            examples = RichTable(show_header=False, box=None, padding=(0, 2))
+            examples.add_column("Command", style="green", no_wrap=True)
+            examples.add_column("Comment", style="dim")
+            examples.add_row("query cluster:0", "# Get all docs in cluster 0")
+            examples.add_row("query cluster:Technology", "# Get all docs in Technology cluster")
+            examples.add_row("query label:Sports", "# Get all docs with Sports label")
+            examples.add_row("query \"C:\\my_docs\"", "# Get all docs with source path")
+            self.console.print(examples)
 
         elif cmd in ("exit", "quit"):
             exit(0)

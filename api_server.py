@@ -223,6 +223,8 @@ async def get_collection_info(collection_name: str):
             raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found")
         
         info = qdrant_service.get_collection_info(collection_name)
+        if not info:
+            raise HTTPException(status_code=500, detail=f"Failed to get collection info for '{collection_name}'")
         embedding_model = info.get('embedding_model') or infer_embedding_model(info['dimension'])
         
         # Get collection metadata for clustering info
@@ -264,7 +266,7 @@ async def get_all_points(
             # Fetch all pages iteratively (heavy; use with caution)
             aggregated_points = []
             page_offset = None
-            page_size = 1000  # hard paging size for stability
+            page_size = DEFAULT_PAGE_SIZE  # hard paging size for stability
             while True:
                 page_points, page_offset = qdrant_service.scroll_vectors(
                     collection_name,
@@ -282,7 +284,7 @@ async def get_all_points(
             next_offset = None
         else:
             # Get a single page respecting limit
-            page_size = min(limit, 1000)
+            page_size = min(limit, DEFAULT_PAGE_SIZE)
             points, next_offset = qdrant_service.scroll_vectors(
                 collection_name,
                 limit=page_size,
@@ -385,9 +387,9 @@ async def get_all_labels(
         if use_cache:
             try:
                 metadata = qdrant_service.get_collection_metadata(collection_name)
-                if metadata and metadata.get("labels_summary"):
-                    label_counts = metadata.get("labels_summary") or {}
-                    labels = [LabelInfo(label=label, count=count) for label, count in sorted(label_counts.items())]
+                summary = metadata.get("labels_summary") if metadata else None
+                if isinstance(summary, dict) and len(summary) > 0:
+                    labels = [LabelInfo(label=label, count=count) for label, count in sorted(summary.items())]
                     return {
                         "collection": collection_name,
                         "labels": labels,
@@ -422,7 +424,8 @@ async def get_all_labels(
             "labels": labels,
             "page_size": limit,
             "returned": len(points),
-            "next_offset": next_offset
+            "next_offset": next_offset,
+            "total_labels": len(labels)
         }
     except HTTPException:
         raise
@@ -500,8 +503,8 @@ async def get_all_clusters(
         if use_cache:
             try:
                 metadata = qdrant_service.get_collection_metadata(collection_name)
-                if metadata and metadata.get("clusters_summary"):
-                    summary = metadata.get("clusters_summary") or {}
+                summary = metadata.get("clusters_summary") if metadata else None
+                if isinstance(summary, dict) and len(summary) > 0:
                     clusters = [
                         ClusterInfo(
                             cluster_id=int(v.get("cluster_id", int(k))),
@@ -550,7 +553,8 @@ async def get_all_clusters(
             "clusters": clusters,
             "page_size": limit,
             "returned": len(points),
-            "next_offset": next_offset
+            "next_offset": next_offset,
+            "total_clusters": len(clusters)
         }
     except HTTPException:
         raise

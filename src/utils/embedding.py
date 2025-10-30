@@ -1,42 +1,26 @@
 import numpy as np
 import random
 from src.utils.hash_utils import generate_deterministic_seed
+from typing import List
 
-def embed(texts, model="text-embedding-3-small"):
-    """Generate embeddings for texts. Falls back to random vectors if OpenAI API is not available."""
-    
+def embed(texts, model: str = "text-embedding-3-small") -> List[List[float]]:
+    """Generate embeddings for texts.
+    Delegates to OpenAIService when available; falls back to deterministic random.
+    """
     if isinstance(texts, str):
         texts = [texts]
 
     try:
-        # Try to use OpenAI API first
-        from openai import OpenAI
-        
-        # Try to import API key with proper error handling
-        try:
-            from src.pipelines.classification.credentials import OPENAI_API_KEY
-        except ImportError:
-            # Fallback to environment variable if credentials file doesn't exist
-            import os
-            OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-        except Exception as e:
-            # If there's any other error with the credentials file, fallback to env
-            print(f"Warning: Could not load credentials file: {e}")
-            import os
-            OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-        
-        if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here":
-            raise ValueError("No valid OpenAI API key found")
-        
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        response = client.embeddings.create(input=texts, model=model)
-        return [item.embedding for item in response.data]
-
+        # Prefer centralized service implementation (handles batching, timeouts, fallbacks)
+        from src.services.openai_service import OpenAIService
+        service = OpenAIService(log_function=lambda *_: None)
+        embeddings = service.generate_embeddings(texts, model=model)
+        if embeddings:
+            return embeddings
+        # Fallback if service returns empty
+        return _generate_random_embeddings(texts, model)
     except Exception as e:
-        print(f"OpenAI API failed: {e}")
-        print("Falling back to random vectors for testing...")
-        
-        # Fallback to random vectors for testing
+        print(f"Embedding service failed: {e}")
         return _generate_random_embeddings(texts, model)
 
 def _generate_random_embeddings(texts, model="text-embedding-3-small"):

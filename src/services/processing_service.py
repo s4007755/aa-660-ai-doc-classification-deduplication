@@ -76,8 +76,10 @@ class ProcessingService:
             texts = []
             payloads = []
 
-            # Get all files from directory with document extensions
-            extensions = ['.txt', '.md', '.docx', '.pdf', '.html']
+            # Get all files from directory with supported text-like extensions
+            # Note: Local PDF/DOCX parsing is not performed here to avoid empty ingestions.
+            # Prefer using URL ingestion for PDFs or add dedicated parsers when needed.
+            extensions = ['.txt', '.md', '.html']
             all_files = directory_enumerator(directory_path, extensions, limit)
 
             # Apply limit if specified

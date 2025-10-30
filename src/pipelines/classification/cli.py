@@ -31,6 +31,7 @@ class Cli:
     
     def __init__(self, host="localhost", port=6333):
         self.console = Console()
+        self.page_limit = 10000
         
         # Initialize services
         self.qdrant_service = QdrantService(host, port, self.log)
@@ -103,11 +104,36 @@ class Cli:
         self.qdrant_service = QdrantService(host, port, self.log)
         self.classifier = DocumentClassifier(self.qdrant_service, self.log)
 
+    def _scroll_all(self, with_payload=True, with_vectors=False, filter_conditions=None, page_limit: int = None):
+        """Helper: scroll entire collection, returning concatenated points list."""
+        if page_limit is None:
+            page_limit = self.page_limit
+        points_list = []
+        page_offset = None
+        while True:
+            page_points, page_offset = self.qdrant_service.scroll_vectors(
+                self.collection,
+                page_limit,
+                with_payload=with_payload,
+                with_vectors=with_vectors,
+                page_offset=page_offset,
+                filter_conditions=filter_conditions,
+            )
+            if not page_points:
+                break
+            points_list.extend(page_points)
+            if not page_offset:
+                break
+        return points_list
+
     def _cluster_command(self, num_clusters=None, debug=False):
         """Perform clustering on the current collection."""
         try:
             # Get collection info using QdrantService
             collection_info = self.qdrant_service.get_collection_info(self.collection)
+            if not collection_info:
+                self.log("Failed to retrieve collection info.", True)
+                return
             total_points = collection_info['vector_count']
             
             if total_points == 0:
@@ -118,22 +144,7 @@ class Cli:
             self.log(f"Processing all {total_points} vectors for clustering...")
             
             # Retrieve all vectors with pagination to avoid service caps
-            points_list = []
-            page_offset = None
-            page_limit = 10000
-            while True:
-                page_points, page_offset = self.qdrant_service.scroll_vectors(
-                    self.collection,
-                    page_limit,
-                    with_payload=True,
-                    with_vectors=True,
-                    page_offset=page_offset
-                )
-                if not page_points:
-                    break
-                points_list.extend(page_points)
-                if not page_offset:
-                    break
+            points_list = self._scroll_all(with_payload=True, with_vectors=True)
             
             if not points_list:
                 self.log("No vectors found in collection.", True)
@@ -177,31 +188,40 @@ class Cli:
                 cluster_labels = kmeans.fit_predict(vectors)
             else:
                 # Unsupervised clustering (Agglomerative with distance threshold)
-                algorithm = "agglomerative"
-                self.log("Performing unsupervised clustering using Agglomerative Clustering...")
-                
-                # Calculate optimal distance threshold based on data size
-                # For embeddings, cosine distance works better than euclidean
-                sample_size = min(1000, len(vectors))
-                sample_vectors = vectors[:sample_size]
-                distances = cosine_distances(sample_vectors)
-                # Use 75th percentile of distances as threshold
-                distance_threshold = np.percentile(distances[distances > 0], 75)
-                
-                self.log(f"Using distance threshold: {distance_threshold:.3f}")
-                
-                # Use precomputed distance matrix to avoid cosine metric issues with zero vectors
-                # Calculate full distance matrix for all vectors
-                self.log("Computing distance matrix...")
-                full_distances = cosine_distances(vectors)
-                
-                agglo = AgglomerativeClustering(
-                    n_clusters=None,  # Let distance threshold determine clusters
-                    distance_threshold=distance_threshold,
-                    linkage='average',  # Average linkage works well for text
-                    metric='precomputed'  # Use precomputed distance matrix
-                )
-                cluster_labels = agglo.fit_predict(full_distances)
+                # Fallback to KMeans for very large datasets to avoid O(n^2) memory/time
+                if len(vectors) > 5000:
+                    algorithm = "kmeans_fallback"
+                    # Heuristic: sqrt(n/2), bounded
+                    est_k = int(max(2, min(200, np.sqrt(len(vectors) / 2))))
+                    self.log(f"Dataset large ({len(vectors)}). Falling back to K-means with ~{est_k} clusters...")
+                    kmeans = KMeans(n_clusters=est_k, random_state=42, n_init=10)
+                    cluster_labels = kmeans.fit_predict(vectors)
+                else:
+                    algorithm = "agglomerative"
+                    self.log("Performing unsupervised clustering using Agglomerative Clustering...")
+                    
+                    # Calculate optimal distance threshold based on data size
+                    # For embeddings, cosine distance works better than euclidean
+                    sample_size = min(1000, len(vectors))
+                    sample_vectors = vectors[:sample_size]
+                    distances = cosine_distances(sample_vectors)
+                    # Use 75th percentile of distances as threshold
+                    distance_threshold = np.percentile(distances[distances > 0], 75)
+                    
+                    self.log(f"Using distance threshold: {distance_threshold:.3f}")
+                    
+                    # Use precomputed distance matrix to avoid cosine metric issues with zero vectors
+                    # Calculate full distance matrix for all vectors
+                    self.log("Computing distance matrix...")
+                    full_distances = cosine_distances(vectors)
+                    
+                    agglo = AgglomerativeClustering(
+                        n_clusters=None,  # Let distance threshold determine clusters
+                        distance_threshold=distance_threshold,
+                        linkage='average',  # Average linkage works well for text
+                        metric='precomputed'  # Use precomputed distance matrix
+                    )
+                    cluster_labels = agglo.fit_predict(full_distances)
             
             # Update vectors with cluster assignments using QdrantService
             self.log("Updating vectors with cluster assignments...")
@@ -335,45 +355,29 @@ class Cli:
     def _scan_inferred_labels(self, total_points):
         """Helper: Scan documents for inferred labels (predicted_label)."""
         inferred = {}
-        page_offset = None
-        while True:
-            points_list, page_offset = self.qdrant_service.scroll_vectors(
-                self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
-            )
-            if not points_list:
-                break
-            for p in points_list:
-                payload = p.get('payload', {}) or {}
-                if payload.get('_metadata'):
-                    continue
-                label = payload.get('predicted_label')
-                if label:
-                    inferred[label] = inferred.get(label, 0) + 1
-            if not page_offset:
-                break
+        points_list = self._scroll_all(with_payload=True, with_vectors=False)
+        for p in points_list:
+            payload = p.get('payload', {}) or {}
+            if payload.get('_metadata'):
+                continue
+            label = payload.get('predicted_label')
+            if label:
+                inferred[label] = inferred.get(label, 0) + 1
         return inferred
     
     def _scan_clusters(self):
         """Helper: Scan documents for cluster assignments."""
         cluster_counts = {}
-        page_offset = None
-        while True:
-            points_list, page_offset = self.qdrant_service.scroll_vectors(
-                self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
-            )
-            if not points_list:
-                break
-            for point in points_list:
-                payload = point.get('payload', {}) or {}
-                if payload.get('_metadata'):
-                    continue
-                cluster_id = payload.get('cluster_id')
-                if cluster_id is not None:
-                    cluster_name = payload.get('cluster_name', f'Cluster_{cluster_id}')
-                    key = (cluster_id, cluster_name)
-                    cluster_counts[key] = cluster_counts.get(key, 0) + 1
-            if not page_offset:
-                break
+        points_list = self._scroll_all(with_payload=True, with_vectors=False)
+        for point in points_list:
+            payload = point.get('payload', {}) or {}
+            if payload.get('_metadata'):
+                continue
+            cluster_id = payload.get('cluster_id')
+            if cluster_id is not None:
+                cluster_name = payload.get('cluster_name', f'Cluster_{cluster_id}')
+                key = (cluster_id, cluster_name)
+                cluster_counts[key] = cluster_counts.get(key, 0) + 1
         return cluster_counts
 
     def _list_labels_command(self):
@@ -381,6 +385,9 @@ class Cli:
         try:
             # Get collection info
             collection_info = self.qdrant_service.get_collection_info(self.collection)
+            if not collection_info:
+                self.log("Failed to retrieve collection info.", True)
+                return
             total_points = collection_info['vector_count']
             
             if total_points == 0:
@@ -614,11 +621,13 @@ class Cli:
                         with_payload=True,
                         with_vectors=False
                     )
-                    points_list = [{"id": p.id, "payload": p.payload} for p in point]
+                    points_list = [{"id": p.id, "payload": p.payload} for p in point] if point else []
                 except Exception:
                     # Fallback to scroll and filter in Python
-                    page_offset = None
                     points_list = []
+                # If retrieve failed or returned empty, fallback to scroll-based lookup
+                if not points_list:
+                    page_offset = None
                     while True:
                         page_points, page_offset = self.qdrant_service.scroll_vectors(
                             self.collection, 1000, with_payload=True, with_vectors=False, page_offset=page_offset
@@ -626,9 +635,12 @@ class Cli:
                         if not page_points:
                             break
                         for p in page_points:
-                            if int(p.get('id', -1)) == int(query):
-                                points_list = [p]
-                                break
+                            try:
+                                if int(p.get('id', -1)) == int(query):
+                                    points_list = [p]
+                                    break
+                            except Exception:
+                                continue
                         if points_list or not page_offset:
                             break
             
@@ -701,17 +713,7 @@ class Cli:
             doc_types = {}
             has_classifications = False
             if total_vectors > 0:
-                points_list = []
-                page_offset = None
-                while True:
-                    page_points, page_offset = self.qdrant_service.scroll_vectors(
-                        self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
-                    )
-                    if not page_points:
-                        break
-                    points_list.extend(page_points)
-                    if not page_offset:
-                        break
+                points_list = self._scroll_all(with_payload=True, with_vectors=False)
                 
                 # Document types and check for classifications
                 for point in points_list:

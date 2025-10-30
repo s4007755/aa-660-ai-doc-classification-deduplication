@@ -11,6 +11,8 @@ This module provides comprehensive document classification functionality includi
 import json
 import os
 from typing import List
+
+PAGING_LIMIT = 10000
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from qdrant_client.models import PointStruct
@@ -229,7 +231,7 @@ class DocumentClassifier:
                 while True:
                     points_page, page_offset = self.qdrant_service.scroll_vectors(
                         collection_name,
-                        10000,
+                        PAGING_LIMIT,
                         with_payload=True,
                         with_vectors=False,
                         page_offset=page_offset
@@ -377,14 +379,8 @@ class DocumentClassifier:
     def _enrich_labels_data(self, labels_data):
         """Enrich labels with AI-generated descriptions."""
         try:
-            # Try to import API key with proper error handling
-            try:
-                from src.pipelines.classification.credentials import OPENAI_API_KEY
-            except ImportError:
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-            except Exception as e:
-                self.log(f"Warning: Could not load credentials file: {e}", True)
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+            # Centralized: use environment variable only
+            OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":
                 self.log("No valid OpenAI API key found. Skipping enrichment.", True)
@@ -427,14 +423,8 @@ class DocumentClassifier:
     def _generate_label_description(self, label_name, existing_desc=""):
         """Generate AI description for a label."""
         try:
-            # Try to import API key with proper error handling
-            try:
-                from src.pipelines.classification.credentials import OPENAI_API_KEY
-            except ImportError:
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-            except Exception as e:
-                self.log(f"Warning: Could not load credentials file: {e}", True)
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+            # Centralized: use environment variable only
+            OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":
                 return f"Content related to {label_name.lower()} topics and themes."

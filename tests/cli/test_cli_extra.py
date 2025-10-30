@@ -136,8 +136,9 @@ class TestCLIClusterDebug:
             mo = mock_openai.return_value
             mo.generate_single_word_cluster_label.return_value = "X"
             with patch('src.pipelines.classification.cli.json.dump'):
-                # Should complete without exceptions when debug=True
-                cli._cluster_command(num_clusters=2, debug=True)
+                # Avoid creating cluster output file on disk
+                with patch('builtins.open', create=True):
+                    cli._cluster_command(num_clusters=2, debug=True)
             assert True
 
 

@@ -294,9 +294,9 @@ class Cli:
         if not result["success"]:
             self.log(result["error"], True)
 
-    def _add_label_command(self, label_name, description=None):
+    def _add_label_command(self, label_name, description=None, enrich=False):
         """Add a new label to the collection."""
-        result = self.classifier.add_label_to_collection(self.collection, label_name, description)
+        result = self.classifier.add_label_to_collection(self.collection, label_name, description, enrich=enrich)
         
         if not result["success"]:
             self.log(result["error"], True)
@@ -937,10 +937,15 @@ class Cli:
             parser = NoExitArgParser(prog="add-label", add_help=False)
             parser.add_argument("label_name", help="Name of the label to add")
             parser.add_argument("--description", help="Description for the label")
+            parser.add_argument("--enrich", action="store_true", help="Generate AI description when none provided")
             
             try:
                 opts = parser.parse_args(args)
-                self._add_label_command(opts.label_name, opts.description)
+                self._add_label_command(
+                    opts.label_name,
+                    opts.description if opts.description else None,
+                    enrich=opts.enrich
+                )
             except ValueError as e:
                 self.log(f"Invalid add-label arguments: {e}. Usage: add-label <label> [--description]", True)
 

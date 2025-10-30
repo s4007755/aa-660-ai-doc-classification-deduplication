@@ -201,7 +201,7 @@ class DocumentClassifier:
             self.log(f"Label enrichment failed: {e}", True)
             return {"success": False, "error": str(e)}
     
-    def add_label_to_collection(self, collection_name, label_name, description=None):
+    def add_label_to_collection(self, collection_name, label_name, description=None, enrich=False):
         """
         Add a new label to the collection.
         
@@ -209,19 +209,23 @@ class DocumentClassifier:
             collection_name: Name of the collection
             label_name: Name of the label to add
             description: Optional description for the label
+            enrich: If True and no description is provided, generate an AI description
             
         Returns:
             dict: Addition results
         """
         try:
-            # Generate AI description if not provided
-            if not description:
-                description = self._generate_label_description(label_name)
+            # Determine description and enrichment flag
+            final_description = description
+            enriched_flag = False
+            if not description and enrich:
+                final_description = self._generate_label_description(label_name)
+                enriched_flag = True
             
             # Generate embedding for the label
             label_text = label_name
-            if description:
-                label_text += f": {description}"
+            if final_description:
+                label_text += f": {final_description}"
             
             embeddings = embed([label_text])
             if not embeddings:
@@ -235,9 +239,9 @@ class DocumentClassifier:
             metadata = {
                 "label_id": label_id,
                 "label_name": label_name,
-                "description": description,
+                "description": final_description,
                 "type": "label",
-                "enriched": True,
+                "enriched": enriched_flag,
                 "custom": True,
                 "hash": HashUtils.create_label_hash(label_id, label_text)
             }
@@ -467,7 +471,7 @@ def enrich_labels(vecdb_client, labels_file, store_in_collection=False, collecti
     return classifier.enrich_labels(labels_file, store_in_collection, collection_name)
 
 
-def add_label_to_collection(vecdb_client, collection_name, label_name, description=None, log_function=None):
+def add_label_to_collection(vecdb_client, collection_name, label_name, description=None, enrich=False, log_function=None):
     """Convenience function for adding labels to collection."""
     classifier = DocumentClassifier(vecdb_client, log_function)
-    return classifier.add_label_to_collection(collection_name, label_name, description)
+    return classifier.add_label_to_collection(collection_name, label_name, description, enrich=enrich)

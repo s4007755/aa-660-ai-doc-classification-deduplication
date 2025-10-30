@@ -1154,11 +1154,12 @@ class Cli:
             query_string = " ".join(args)
             self._query_command(query_string)
 
-        elif cmd == "stats":
+        elif cmd == "info" or cmd == "stats":
             if self.collection is None:
                 self.log("No collection selected.", True)
                 return
-            
+            if cmd == "stats":
+                self.log("'stats' is deprecated. Use 'info' instead.")
             self._stats_command()
 
         elif cmd == "retry":
@@ -1280,7 +1281,7 @@ class Cli:
             help_table.add_row("[bold magenta]Data[/bold magenta]", "")
             help_table.add_row(f"  [green]source[/green] [cyan]<path>[/cyan] [cyan]{escape('[--limit]')}[/cyan] [cyan]{escape('[--text-column]')}[/cyan] [cyan]{escape('[--url-column]')}[/cyan]", "Ingest data")
             help_table.add_row("  [green]query[/green] [cyan]<query>[/cyan]", "Search (cluster/label/url/id)")
-            help_table.add_row("  [green]stats[/green]", "Collection stats")
+            help_table.add_row("  [green]info[/green]", "Collection info and stats")
             
             # Analysis
             help_table.add_row("", "")

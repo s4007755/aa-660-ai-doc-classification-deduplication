@@ -96,6 +96,9 @@ class TestDocumentClassification:
         ]
         mock_qdrant.scroll_vectors.return_value = (mock_points, None)
         
+        # Mock update_payload_batch to return (success, count) tuple
+        mock_qdrant.update_payload_batch.return_value = (True, 2)
+        
         # Mock embed function
         with patch('src.pipelines.classification.classifier.embed') as mock_embed:
             mock_embed.return_value = [[0.15] * 1536, [0.25] * 1536]
@@ -135,6 +138,9 @@ class TestDocumentClassification:
             ]
             mock_qdrant.scroll_vectors.return_value = (mock_points, None)
             
+            # Mock update_payload_batch to return (success, count) tuple
+            mock_qdrant.update_payload_batch.return_value = (True, 1)
+            
             # Mock embed
             with patch('src.pipelines.classification.classifier.embed') as mock_embed:
                 mock_embed.return_value = [[0.15] * 1536]
@@ -167,6 +173,9 @@ class TestDocumentClassification:
                 {"id": 1, "vector": [0.1] * 1536, "payload": {"source": "doc1"}}
             ]
             mock_qdrant.scroll_vectors.return_value = (mock_points, None)
+            
+            # Mock update_payload_batch to return (success, count) tuple
+            mock_qdrant.update_payload_batch.return_value = (True, 1)
             
             with patch('src.pipelines.classification.classifier.embed') as mock_embed:
                 mock_embed.return_value = [[0.15] * 1536]
@@ -451,6 +460,9 @@ class TestConvenienceFunctions:
         mock_qdrant.get_collection_info.return_value = {"vector_count": 1}
         mock_points = [{"id": 1, "vector": [0.1] * 1536, "payload": {}}]
         mock_qdrant.scroll_vectors.return_value = (mock_points, None)
+        
+        # Mock update_payload_batch to return (success, count) tuple
+        mock_qdrant.update_payload_batch.return_value = (True, 1)
         
         with patch('src.pipelines.classification.classifier.embed') as mock_embed:
             mock_embed.return_value = [[0.15] * 1536]

@@ -41,7 +41,8 @@ class TestClassifierFailures:
         mock_q.get_collection_info.return_value = {"vector_count": 1}
         mock_q.scroll_vectors.return_value = ([{"id":1, "vector":[0.1], "payload":{}}], None)
         with patch('src.pipelines.classification.classifier.embed', return_value=[[0.1]]):
-            mock_q.update_payload.return_value = False
+            # Mock update_payload_batch to return (success=False, count=0) tuple
+            mock_q.update_payload_batch.return_value = (False, 0)
             result = classifier.classify_documents('c', labels_file=str(lp))
         assert result['success'] is True and result['classified_count'] == 0
 

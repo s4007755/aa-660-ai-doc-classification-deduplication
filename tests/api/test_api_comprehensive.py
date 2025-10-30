@@ -15,8 +15,8 @@ import os
 from fastapi.testclient import TestClient
 from unittest.mock import Mock, MagicMock, patch
 
-# Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Add src to path for imports (from tests/api/ up to project root)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 # Import API server
 from api_server import app, get_cached_collections, infer_embedding_model

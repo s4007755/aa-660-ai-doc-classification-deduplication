@@ -16,7 +16,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from qdrant_client.models import PointStruct
 from src.utils.embedding import embed
 from src.utils.hash_utils import HashUtils
-from openai import OpenAI
+import openai
 
 
 class DocumentClassifier:
@@ -341,7 +341,7 @@ class DocumentClassifier:
                 self.log("No valid OpenAI API key found. Skipping enrichment.", True)
                 return labels_data
             
-            client = OpenAI(api_key=OPENAI_API_KEY)
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
             
             enriched_data = {}
             for label_id, label_data in labels_data.items():
@@ -390,7 +390,7 @@ class DocumentClassifier:
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":
                 return f"Content related to {label_name.lower()} topics and themes."
             
-            client = OpenAI(api_key=OPENAI_API_KEY)
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
             
             prompt = f"""
 Generate a concise, professional description for the label "{label_name}".

@@ -248,37 +248,18 @@ class Cli:
             except Exception as e:
                 self.log(f"Failed writing cluster names to payloads: {e}", True)
             
-            # Save cluster information
-            cluster_info = {
-                "algorithm": algorithm,
-                "num_clusters": len(set(cluster_labels)),
-                "cluster_names": cluster_names,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # Convert numpy types to Python types for JSON serialization
-            cluster_info["num_clusters"] = int(cluster_info["num_clusters"])
-            converted_names = {}
-            for key, value in cluster_info["cluster_names"].items():
-                converted_names[str(key)] = str(value)
-            cluster_info["cluster_names"] = converted_names
-            
-            # Save to file
-            with open(f"{self.collection}_clusters.json", "w") as f:
-                json.dump(cluster_info, f, indent=2)
-            
             # Update collection metadata with clustering information
+            num_clusters = len(set(cluster_labels))
             self.qdrant_service.update_collection_metadata(
                 self.collection,
                 {
                     "clustering_algorithm": algorithm,
-                    "num_clusters": int(cluster_info["num_clusters"]),
+                    "num_clusters": int(num_clusters),
                     "clustered_at": datetime.now().isoformat()
                 }
             )
             
-            self.log(f"Clustering completed! Found {len(set(cluster_labels))} clusters.")
-            self.log(f"Cluster information saved to {self.collection}_clusters.json")
+            self.log(f"Clustering completed! Found {num_clusters} clusters.")
             
         except Exception as e:
             self.log(f"Clustering failed: {e}", True)

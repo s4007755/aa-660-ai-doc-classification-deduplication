@@ -314,22 +314,29 @@ class Cli:
             self.log(result["error"], True)
 
     def _list_labels_command(self):
-        """List labels stored in the collection; fall back to inferred labels if none stored."""
-        result = self.classifier.get_collection_labels(self.collection)
-        
-        if result["success"]:
-            labels = result["labels"]
-            if labels:
-                print(f"\n=== Labels in Collection: {self.collection} ===")
-                for label_id, label_data in labels.items():
-                    print(f"  {label_id}: {label_data['label']}")
-                    if label_data.get('description'):
-                        print(f"    Description: {label_data['description']}")
-                    print(f"    Enriched: {label_data.get('enriched', False)}")
-                    print()
+        """List both stored and inferred labels in the collection."""
+        try:
+            from rich.table import Table
+            
+            # Get collection info
+            collection_info = self.qdrant_service.get_collection_info(self.collection)
+            total_points = collection_info['vector_count']
+            
+            if total_points == 0:
+                self.console.print(f"\n[yellow]No vectors in collection '{self.collection}'[/yellow]\n")
                 return
             
-            # Fallback: infer label names from document payloads (predicted_label) with pagination
+            # Get stored labels
+            result = self.classifier.get_collection_labels(self.collection)
+            if not result["success"]:
+                self.log(result["error"], True)
+                return
+            
+            stored_labels = result["labels"]
+            
+            # Get inferred labels from classified documents
+            self.console.print(f"\n[dim]Scanning {total_points} documents for labels...[/dim]")
+            
             inferred = {}
             page_offset = None
             while True:
@@ -347,15 +354,67 @@ class Cli:
                         inferred[label] = inferred.get(label, 0) + 1
                 if not page_offset:
                     break
+            
+            # Show stored labels if they exist
+            if stored_labels:
+                self.console.print(f"\n[bold cyan]Stored Labels in Collection:[/bold cyan] [yellow]{self.collection}[/yellow]")
+                self.console.print(f"[dim]{self._hr()}[/dim]")
+                
+                label_table = Table(show_header=True, box=None, padding=(0, 2))
+                label_table.add_column("Label ID", style="yellow")
+                label_table.add_column("Label Name", style="blue")
+                label_table.add_column("Description", style="dim")
+                label_table.add_column("Enriched", style="cyan", justify="center")
+                
+                for label_id, label_data in sorted(stored_labels.items(), key=lambda x: x[1].get('label', '')):
+                    description = label_data.get('description') or ''
+                    truncated_desc = description[:50] + ('...' if len(description) > 50 else '') if description else ''
+                    label_table.add_row(
+                        label_id,
+                        label_data.get('label', ''),
+                        truncated_desc,
+                        "✓" if label_data.get('enriched', False) else "-"
+                    )
+                
+                self.console.print(label_table)
+                self.console.print(f"\n[dim]Total: {len(stored_labels)} stored labels[/dim]")
+            
+            # Show inferred labels if they exist
             if inferred:
-                print(f"\n=== Inferred Labels (from predicted_label) in {self.collection} ===")
+                if stored_labels:
+                    self.console.print()  # Extra spacing between sections
+                
+                self.console.print(f"\n[bold cyan]Inferred Labels (from classified documents):[/bold cyan] [yellow]{self.collection}[/yellow]")
+                self.console.print(f"[dim]{self._hr()}[/dim]")
+                
+                label_table = Table(show_header=True, box=None, padding=(0, 2))
+                label_table.add_column("Label Name", style="blue")
+                label_table.add_column("Documents", style="green", justify="right")
+                label_table.add_column("Percentage", style="cyan", justify="right")
+                
                 for name, count in sorted(inferred.items(), key=lambda x: (-x[1], x[0])):
-                    print(f"  {name}  (docs: {count})")
-                print("\n[dim]Note: store labels explicitly via enrich-labels --store-in-collection or add-label[/dim]")
-            else:
-                print(f"No labels found in collection '{self.collection}'")
-        else:
-            self.log(result["error"], True)
+                    percentage = (count / total_points) * 100
+                    label_table.add_row(
+                        name,
+                        f"{count:,}",
+                        f"{percentage:.1f}%"
+                    )
+                
+                self.console.print(label_table)
+                self.console.print(f"\n[dim]Total: {len(inferred)} inferred labels[/dim]")
+                
+                if not stored_labels:
+                    self.console.print("[dim]Store labels explicitly via: enrich-labels --store-in-collection or add-label[/dim]")
+            
+            # If neither stored nor inferred labels exist
+            if not stored_labels and not inferred:
+                self.console.print(f"\n[yellow]No labels found in collection '{self.collection}'[/yellow]")
+                self.console.print("[dim]Run 'classify' command to assign labels to documents[/dim]")
+            
+            self.console.print()
+                
+        except Exception as e:
+            self.log(f"List labels failed: {e}", True)
 
     def _list_clusters_command(self):
         """List all clusters in the collection."""
@@ -598,7 +657,12 @@ class Cli:
                 # Document types
                 doc_types = {}
                 for point in points_list:
-                    doc_type = point.get('payload', {}).get('type', 'unknown')
+                    payload = point.get('payload', {})
+                    # Check if it's metadata (has _metadata field)
+                    if payload.get('_metadata'):
+                        doc_type = 'metadata'
+                    else:
+                        doc_type = payload.get('type', 'unknown')
                     doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
                 
                 if doc_types:
@@ -1148,11 +1212,11 @@ class Cli:
             help_table.add_row("", "")
             help_table.add_row("[bold magenta]Analysis[/bold magenta]", "")
             help_table.add_row(f"  [green]cluster[/green] [cyan]{escape('[--num-clusters]')}[/cyan] [cyan]{escape('[--debug]')}[/cyan]", "Cluster + name")
-            help_table.add_row("  [green]list-clusters[/green]", "Show all clusters")
             help_table.add_row(f"  [green]classify[/green] [cyan]<labels.json>[/cyan] [cyan]{escape('[--use-collection-labels]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Assign labels")
             help_table.add_row(f"  [green]add-label[/green] [cyan]<label>[/cyan] [cyan]{escape('[--description]')}[/cyan] [cyan]{escape('[--enrich]')}[/cyan]", "Store label point")
             help_table.add_row(f"  [green]rm-label[/green] [cyan]<label|label_id>[/cyan] [cyan]{escape('[--by]')}[/cyan] [cyan]{escape('[--yes]')}[/cyan]", "Remove label points")
             help_table.add_row("  [green]list-labels[/green]", "Show labels (stored/inferred)")
+            help_table.add_row("  [green]list-clusters[/green]", "Show all clusters")
             
             # System
             help_table.add_row("[bold magenta]System[/bold magenta]", "")

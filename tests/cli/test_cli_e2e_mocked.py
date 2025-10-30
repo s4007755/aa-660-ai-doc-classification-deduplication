@@ -202,7 +202,7 @@ class TestCLIEndToEnd:
                         # Create CLI and run query command
                         cli = Cli()
                         cli.collection = "test_collection"
-                        cli._query_command("test query")
+                        cli._query_command("label:Test")
                         
                         # Verify scroll was performed
                         mock_services['qdrant'].scroll_vectors.assert_called()

@@ -407,18 +407,14 @@ class Cli:
                 )
             
             else:
-                # Directory or general text query
-                points_list, _ = self.qdrant_service.scroll_vectors(
-                    self.collection, limit, with_payload=True, with_vectors=False,
-                    filter_conditions={"source": query}
-                )
-            
+                # Free-text/source path queries are not supported
+                points_list = []
+        
             if not points_list:
                 self.console.print(f"\n[yellow]No documents found for query:[/yellow] [white]{query}[/white]")
                 self.console.print("\n[cyan]Query Tips:[/cyan]")
                 self.console.print("  • Use [green]cluster:0[/green] or [green]cluster:Economy[/green] to query by cluster")
                 self.console.print("  • Use [green]label:Sports[/green] to query by classification label")
-                self.console.print("  • Use quotes for paths with spaces: [green]query \"C:\\\\path with spaces\"[/green]")
                 return
             
             self.console.print(f"\n[green]Found {len(points_list)} document(s)[/green]")

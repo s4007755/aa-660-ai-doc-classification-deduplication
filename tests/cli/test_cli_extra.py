@@ -112,8 +112,7 @@ class TestCLIQueryVariants:
         mock_q.scroll_vectors.return_value = ([{"id":1,"payload":{}}], None)
         cli.handle_command("query label:Sports")
         cli.handle_command("query 42")
-        cli.handle_command("query C:/data/docs")
-        assert mock_q.scroll_vectors.call_count >= 3
+        assert mock_q.scroll_vectors.call_count >= 2
 
 
 class TestCLIClusterDebug:

@@ -15,7 +15,7 @@ from src.utils.hash_utils import HashUtils
 import shutil
 
 # Constants
-CLUSTER_REPRESENTATIVE_LIMIT = 25  # Number of representative docs per cluster
+CLUSTER_REPRESENTATIVE_LIMIT = 25  # Number of docs per cluster
 TEXT_PREVIEW_LIMIT = 800  # Character limit for text previews (conservative for token limits)
 REQUEST_TIMEOUT = 10  # Timeout for HTTP requests
 MAX_QUERY_RESULTS = 50  # Default limit for query results

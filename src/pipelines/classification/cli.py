@@ -294,6 +294,50 @@ class Cli:
         if not result["success"]:
             self.log(result["error"], True)
 
+    def _scan_inferred_labels(self, total_points):
+        """Helper: Scan documents for inferred labels (predicted_label)."""
+        inferred = {}
+        page_offset = None
+        while True:
+            points_list, page_offset = self.qdrant_service.scroll_vectors(
+                self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
+            )
+            if not points_list:
+                break
+            for p in points_list:
+                payload = p.get('payload', {}) or {}
+                if payload.get('_metadata'):
+                    continue
+                label = payload.get('predicted_label')
+                if label:
+                    inferred[label] = inferred.get(label, 0) + 1
+            if not page_offset:
+                break
+        return inferred
+    
+    def _scan_clusters(self):
+        """Helper: Scan documents for cluster assignments."""
+        cluster_counts = {}
+        page_offset = None
+        while True:
+            points_list, page_offset = self.qdrant_service.scroll_vectors(
+                self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
+            )
+            if not points_list:
+                break
+            for point in points_list:
+                payload = point.get('payload', {}) or {}
+                if payload.get('_metadata'):
+                    continue
+                cluster_id = payload.get('cluster_id')
+                if cluster_id is not None:
+                    cluster_name = payload.get('cluster_name', f'Cluster_{cluster_id}')
+                    key = (cluster_id, cluster_name)
+                    cluster_counts[key] = cluster_counts.get(key, 0) + 1
+            if not page_offset:
+                break
+        return cluster_counts
+
     def _list_labels_command(self):
         """List both stored and inferred labels in the collection."""
         try:
@@ -317,24 +361,7 @@ class Cli:
             
             # Get inferred labels from classified documents
             self.console.print(f"\n[dim]Scanning {total_points} documents for labels...[/dim]")
-            
-            inferred = {}
-            page_offset = None
-            while True:
-                points_list, page_offset = self.qdrant_service.scroll_vectors(
-                    self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
-                )
-                if not points_list:
-                    break
-                for p in points_list:
-                    payload = p.get('payload', {}) or {}
-                    if payload.get('_metadata'):
-                        continue
-                    label = payload.get('predicted_label')
-                    if label:
-                        inferred[label] = inferred.get(label, 0) + 1
-                if not page_offset:
-                    break
+            inferred = self._scan_inferred_labels(total_points)
             
             # Show stored labels if they exist
             if stored_labels:
@@ -412,29 +439,7 @@ class Cli:
             
             # Scan all points to collect cluster information
             self.console.print(f"\n[dim]Scanning {total_points} documents for clusters...[/dim]")
-            cluster_counts = {}
-            page_offset = None
-            
-            while True:
-                points_list, page_offset = self.qdrant_service.scroll_vectors(
-                    self.collection, 10000, with_payload=True, with_vectors=False, page_offset=page_offset
-                )
-                if not points_list:
-                    break
-                    
-                for point in points_list:
-                    payload = point.get('payload', {}) or {}
-                    if payload.get('_metadata'):
-                        continue
-                    
-                    cluster_id = payload.get('cluster_id')
-                    if cluster_id is not None:
-                        cluster_name = payload.get('cluster_name', f'Cluster_{cluster_id}')
-                        key = (cluster_id, cluster_name)
-                        cluster_counts[key] = cluster_counts.get(key, 0) + 1
-                
-                if not page_offset:
-                    break
+            cluster_counts = self._scan_clusters()
             
             if not cluster_counts:
                 self.console.print(f"\n[yellow]No clusters found in collection '{self.collection}'[/yellow]")
@@ -579,32 +584,40 @@ class Cli:
             self.console.print(f"\n[bold cyan]Collection Statistics:[/bold cyan] [yellow]{self.collection}[/yellow]")
             self.console.print(f"[dim]{self._hr()}[/dim]")
             
-            # Get ALL vectors for detailed stats (not just a sample)
-            sample_limit = collection_info['vector_count']  # Process all vectors
+            total_vectors = collection_info['vector_count']
             
             # Get clustering metadata from collection metadata point
             coll_metadata = self.qdrant_service.get_collection_metadata(self.collection)
             clustering_algorithm = coll_metadata.get('clustering_algorithm') if coll_metadata else None
-            metadata_num_clusters = coll_metadata.get('num_clusters') if coll_metadata else None
             
-            # Quick scan to check for classifications
+            # Get ALL vectors for detailed stats and detect classifications
+            doc_types = {}
             has_classifications = False
-            if sample_limit > 0:
-                quick_sample, _ = self.qdrant_service.scroll_vectors(
-                    self.collection, min(100, sample_limit), with_payload=True, with_vectors=False
+            if total_vectors > 0:
+                points_list, _ = self.qdrant_service.scroll_vectors(
+                    self.collection, total_vectors, with_payload=True, with_vectors=False
                 )
-                for point in quick_sample:
-                    p = point.get('payload', {})
-                    if 'predicted_label' in p:
+                
+                # Document types and check for classifications
+                for point in points_list:
+                    payload = point.get('payload', {})
+                    # Check if it's metadata (has _metadata field)
+                    if payload.get('_metadata'):
+                        doc_type = 'metadata'
+                    else:
+                        doc_type = payload.get('type', 'unknown')
+                    doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
+                    
+                    # Check for classifications
+                    if not has_classifications and 'predicted_label' in payload:
                         has_classifications = True
-                        break
             
             # Basic info table
             info_table = Table(show_header=False, box=None, padding=(0, 2))
             info_table.add_column("Property", style="dim")
             info_table.add_column("Value", style="white")
             
-            info_table.add_row("Total Vectors", f"{collection_info['vector_count']:,}")
+            info_table.add_row("Total Vectors", f"{total_vectors:,}")
             info_table.add_row("Vector Dimension", str(collection_info['dimension']))
             info_table.add_row("Distance Metric", collection_info['distance_metric'])
             
@@ -629,44 +642,20 @@ class Cli:
             
             self.console.print(info_table)
             
-            # Get ALL vectors for detailed stats (if not already retrieved)
-            if sample_limit > 0:
-                points_list, _ = self.qdrant_service.scroll_vectors(
-                    self.collection, sample_limit, with_payload=True, with_vectors=False
-                )
+            if doc_types:
+                self.console.print(f"\n[bold cyan]Document Types[/bold cyan]")
+                doc_table = Table(show_header=False, box=None, padding=(0, 2))
+                doc_table.add_column("Type", style="white")
+                doc_table.add_column("Count", style="green", justify="right")
                 
-                # Document types
-                doc_types = {}
-                for point in points_list:
-                    payload = point.get('payload', {})
-                    # Check if it's metadata (has _metadata field)
-                    if payload.get('_metadata'):
-                        doc_type = 'metadata'
-                    else:
-                        doc_type = payload.get('type', 'unknown')
-                    doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
+                for doc_type, count in sorted(doc_types.items()):
+                    doc_table.add_row(doc_type, f"{count:,}")
                 
-                if doc_types:
-                    self.console.print(f"\n[bold cyan]Document Types[/bold cyan]")
-                    doc_table = Table(show_header=False, box=None, padding=(0, 2))
-                    doc_table.add_column("Type", style="white")
-                    doc_table.add_column("Count", style="green", justify="right")
-                    
-                    for doc_type, count in sorted(doc_types.items()):
-                        doc_table.add_row(doc_type, f"{count:,}")
-                    
-                    self.console.print(doc_table)
-                
-                # Clusters
-                cluster_counts = {}
-                for point in points_list:
-                    p = point.get('payload', {})
-                    cid = p.get('cluster_id')
-                    if cid is None:
-                        continue
-                    cname = p.get('cluster_name', f'Cluster_{cid}')
-                    key = (cid, cname)
-                    cluster_counts[key] = cluster_counts.get(key, 0) + 1
+                self.console.print(doc_table)
+            
+            # Clusters - use helper method
+            if total_vectors > 0:
+                cluster_counts = self._scan_clusters()
                 
                 if cluster_counts:
                     self.console.print(f"\n[bold cyan]Clusters[/bold cyan] [dim]({len(cluster_counts)} total)[/dim]")
@@ -680,13 +669,10 @@ class Cli:
                         cluster_table.add_row(cluster_name, str(cluster_id), f"{count:,}")
                     
                     self.console.print(cluster_table)
-                
-                # Classifications
-                classification_counts = {}
-                for point in points_list:
-                    predicted_label = point.get('payload', {}).get('predicted_label')
-                    if predicted_label:
-                        classification_counts[predicted_label] = classification_counts.get(predicted_label, 0) + 1
+            
+            # Classifications - use helper method
+            if has_classifications:
+                classification_counts = self._scan_inferred_labels(total_vectors)
                 
                 if classification_counts:
                     self.console.print(f"\n[bold cyan]Classifications[/bold cyan] [dim]({len(classification_counts)} total)[/dim]")
@@ -1301,8 +1287,6 @@ class Cli:
 
             if success:
                 self.log(f"Successfully inserted {inserted_count} items into collection '{self.collection}'")
-                if duplicate_count > 0:
-                    self.log(f"Skipped {duplicate_count} duplicate documents")
                 self.log("Source command completed successfully.")
             else:
                 self.log("Vector insertion failed.", True)

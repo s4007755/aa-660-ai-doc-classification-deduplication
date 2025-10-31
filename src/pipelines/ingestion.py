@@ -1,16 +1,28 @@
 # src/pipelines/ingestion.py
 import os
+import re
 import hashlib
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import docx
 from PyPDF2 import PdfReader
-try:
-    from langdetect import detect
-except Exception:
-    detect = None
+# Language detection disabled for performance
+detect = None
 
-from src.features.text_preproc import filename_tokens
+# Extract tokens from filename (inline to avoid dependency on text_preproc)
+def _filename_tokens(filename: str) -> List[str]:
+    """Extract meaningful tokens from filename for metadata."""
+    if not filename:
+        return []
+    # Get basename (handle both Unix and Windows paths)
+    name = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    # Drop file extension
+    name = re.sub(r"\.[A-Za-z0-9]{1,6}$", "", name)
+    # Replace non-word characters with spaces, normalize, lowercase
+    name = re.sub(r"[^\w]+", " ", name).strip().lower()
+    # Extract tokens: at least 2 chars, not all digits
+    toks = [t for t in name.split() if t and not t.isdigit() and len(t) >= 2]
+    return toks[:20]  # Limit to 20 tokens
 
 # compute SHA256 of the file contents
 def compute_file_hash(file_path: str) -> str:
@@ -100,7 +112,7 @@ def extract_document(file_path: str) -> Dict[str, Any]:
 
     metadata: Dict[str, Any] = {
         "filename": fname,
-        "filename_tokens": filename_tokens(fname),
+        "filename_tokens": _filename_tokens(fname),
         "filepath": file_path,
         "hash": compute_file_hash(file_path),
         "filesize": os.path.getsize(file_path),

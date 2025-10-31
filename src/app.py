@@ -1,4 +1,20 @@
 # src/app.py
+"""
+GUI application for near-duplicate/exact-duplicate detection.
+
+This module wires together:
+- Persistence (SQLite-backed stores)
+- Text preprocessing utilities
+- Learners and ensemble arbitration
+- A Tkinter-based desktop UI with tabs for running, inspecting traces,
+  metrics, run history and document management.
+
+The implementation focuses on being production-friendly:
+- Background threads for long-running work
+- Best-effort resource monitoring (CPU/RAM/IO/GPU via psutil/NVML)
+- Pragmatic presets with a Custom escape hatch
+- Careful separation between UI state and pipeline configuration
+"""
 from __future__ import annotations
 
 import hashlib
@@ -6,11 +22,11 @@ import os
 import random
 import time
 import threading
-import time
 import traceback
 from typing import Any, Dict, List, Optional, Iterable
 import sqlite3
 from pathlib import Path
+import json
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -55,8 +71,45 @@ except Exception:
         _ingestion_mod = None
 
 
-# small scrollable frame helper
+def _safe_nvml_snapshot(min_vram_gb: float = 6.0):
+    """
+    Probe NVIDIA GPUs and return a tuple (has_suitable_gpu, total_vram_gb).
+
+    Best-effort: shields callers from NVML errors and guarantees a boolean/float
+    result even when NVML is unavailable or fails.
+    """
+    if not _NVML_OK:
+        return False, 0.0
+    try:
+        pynvml.nvmlInit()
+        cnt = pynvml.nvmlDeviceGetCount()
+        meets = False
+        total = 0
+        for i in range(cnt):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h).total
+            total += mem
+            if mem / (1024**3) >= min_vram_gb:
+                meets = True
+        total_gb = total / (1024 ** 3)
+        try: pynvml.nvmlShutdown()
+        except Exception: pass
+        return (cnt > 0 and meets), total_gb
+    except Exception:
+        try: pynvml.nvmlShutdown()
+        except Exception: pass
+        return False, 0.0
+
+
 class VScrollFrame(ttk.Frame):
+    """
+    A simple vertically scrollable container implemented with a Canvas and Frame.
+
+    Usage:
+        host = VScrollFrame(parent)
+        host.pack(fill=tk.BOTH, expand=True)
+        inner = host.inner
+    """
     def __init__(self, master, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
 
@@ -72,17 +125,26 @@ class VScrollFrame(ttk.Frame):
         self.vbar.pack(side="right", fill="y")
 
         # Mouse wheel support
-        self.inner.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.inner.bind_all("<Button-4>", self._on_mousewheel_linux)
-        self.inner.bind_all("<Button-5>", self._on_mousewheel_linux)
+        self.canvas.bind("<Enter>", lambda e: (
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel),
+            self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux),
+            self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux),
+        ))
+        self.canvas.bind("<Leave>", lambda e: (
+            self.canvas.unbind_all("<MouseWheel>"),
+            self.canvas.unbind_all("<Button-4>"),
+            self.canvas.unbind_all("<Button-5>"),
+        ))
 
         # Resize inner width with frame
         self.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width - self.vbar.winfo_width()))
 
     def _on_mousewheel(self, event):
+        """Cross-platform wheel handling (Windows/macOS delta convention)."""
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _on_mousewheel_linux(self, event):
+        """X11-style wheel handling (Button-4/5 for up/down)."""
         if event.num == 4:
             self.canvas.yview_scroll(-3, "units")
         elif event.num == 5:
@@ -90,6 +152,16 @@ class VScrollFrame(ttk.Frame):
 
 
 class App(tk.Tk):
+    """
+    Main Tkinter application for duplicate detection.
+
+    Responsibilities:
+    - Assemble the UI (tabs, panels, controls)
+    - Manage in-memory state and persistence interactions
+    - Build pipeline configuration from UI selections
+    - Launch the pipeline on a worker thread and render results
+    - Poll and display resource usage
+    """
     # Main window
     def __init__(self):
         super().__init__()
@@ -110,16 +182,18 @@ class App(tk.Tk):
         self._elapsed_job: Optional[str] = None
         self._run_start_ts: Optional[float] = None
 
-        # NEW: resource monitor state
+        # Resource monitor state
         self._res_job: Optional[str] = None
         self._proc = psutil.Process(os.getpid())
 
         self._build_ui()
         self._refresh_docs_from_db()
         self._refresh_docs_tab()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # UI layout
     def _build_ui(self):
+        """Construct the top-level notebook and all tabs."""
         nb = ttk.Notebook(self)
         nb.pack(fill=tk.BOTH, expand=True)
 
@@ -152,6 +226,7 @@ class App(tk.Tk):
 
     # Main content
     def _build_mode_tab(self, parent: ttk.Frame):
+        """Build the Run tab with presets, advanced options and status panel."""
         # Toolbar
         bar = ttk.Frame(parent, padding=8)
         bar.pack(fill=tk.X)
@@ -171,13 +246,23 @@ class App(tk.Tk):
             command=lambda: [self._refresh_docs_from_db(), self._refresh_docs_tab()],
         ).pack(side=tk.LEFT, padx=(10, 0))
 
+        # Calibration toggle
+        self.var_enable_calibration = tk.BooleanVar(value=False)
+        self.chk_calibration = ttk.Checkbutton(
+            bar,
+            text="Calibration (Experimental)",
+            variable=self.var_enable_calibration,
+            command=self._sync_calib_visibility,
+        )
+        self.chk_calibration.pack(side=tk.LEFT, padx=(12, 0))
+
         self.btn_run = ttk.Button(controls, text="Run", command=self._on_run_clicked)
         self.btn_run.pack(side=tk.RIGHT)
 
         main = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
         main.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        # LEFT: scrollable frame
+        # Left: scrollable frame
         left_wrap = ttk.Frame(main)
         right = ttk.Frame(main)
         main.add(left_wrap, weight=1)
@@ -187,7 +272,7 @@ class App(tk.Tk):
         left_scroller.pack(fill=tk.BOTH, expand=True)
         left = left_scroller.inner
 
-        # Profiles row
+        # Profile section
         prof = ttk.LabelFrame(left, text="Profile")
         prof.pack(fill=tk.X, padx=4, pady=(6, 6))
         ttk.Label(prof, text="Preset:").pack(side=tk.LEFT, padx=(8, 6))
@@ -202,40 +287,41 @@ class App(tk.Tk):
         cb.pack(side=tk.LEFT)
         ttk.Button(prof, text="Apply preset", command=self._apply_preset).pack(side=tk.LEFT, padx=(8, 8))
 
-        # Advanced settings toggle
-        toggle_row = ttk.Frame(left)
-        toggle_row.pack(fill=tk.X, padx=4, pady=(0, 6))
+        # Advanced (Profile) toggle under the row
+        prof_adv_row = ttk.Frame(left)
+        prof_adv_row.pack(fill=tk.X, padx=4, pady=(0, 6))
         self.var_show_adv = tk.BooleanVar(value=False)
         self.btn_toggle_adv = ttk.Checkbutton(
-            toggle_row,
-            text="Advanced settings ▸",
+            prof_adv_row,
+            text="Advanced settings (Profile) ▸",
             variable=self.var_show_adv,
             command=self._toggle_advanced_section,
             style="Toolbutton",
         )
         self.btn_toggle_adv.pack(side=tk.LEFT, padx=(6, 0))
 
-        # Advanced container
+        # Container for the profile’s advanced widgets
         self.adv_container = ttk.LabelFrame(left, text="Advanced")
-        # contents of advanced:
         self.card_sim = LearnerCard(self.adv_container, learner_name="SimHash", kind="simhash", config=LearnerConfig(), collapsed=True)
         self.card_sim.pack(fill=tk.X, padx=4, pady=(0, 6))
-
         self.card_min = LearnerCard(self.adv_container, learner_name="MinHash", kind="minhash", config=LearnerConfig(), collapsed=True)
         self.card_min.pack(fill=tk.X, padx=4, pady=(0, 6))
-
         self.card_emb = LearnerCard(self.adv_container, learner_name="Embedding", kind="embedding", config=LearnerConfig(), collapsed=True)
         self.card_emb.pack(fill=tk.X, padx=4, pady=(0, 6))
 
         self.arbiter_panel = ArbiterPanel(self.adv_container, config=ArbiterConfig(), text="Consensus & Escalation")
         self.arbiter_panel.pack(fill=tk.X, padx=4, pady=(0, 6))
 
-        misc = ttk.LabelFrame(self.adv_container, text="Self-learning & Candidate Generation")
+        # Hide Target precision when calibration is off
+        self._sync_calib_visibility()
+        self.var_enable_calibration.trace_add("write", lambda *_: self._sync_calib_visibility())
+
+        misc = ttk.LabelFrame(self.adv_container, text="Self-training (pseudo-labels) & Candidate Generation")
         misc.pack(fill=tk.X, padx=4, pady=(0, 12))
 
         # Self-learning
         self.var_sl_enable = tk.BooleanVar(value=True)
-        ttk.Checkbutton(misc, text="Enable self-learning", variable=self.var_sl_enable).grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        ttk.Checkbutton(misc, text="Enable self-training", variable=self.var_sl_enable).grid(row=0, column=0, sticky="w", padx=8, pady=4)
         ttk.Label(misc, text="Epochs").grid(row=0, column=1, sticky="e", padx=(16, 4))
         self.entry_sl_epochs = ttk.Entry(misc, width=6)
         self.entry_sl_epochs.insert(0, "2")
@@ -243,36 +329,166 @@ class App(tk.Tk):
 
         # Candidate config
         ttk.Label(misc, text="LSH threshold").grid(row=1, column=0, sticky="e", padx=(8, 4))
-        self.entry_lsh_thr = ttk.Entry(misc, width=6)
-        self.entry_lsh_thr.insert(0, "0.60")
+        self.entry_lsh_thr = ttk.Entry(misc, width=6); self.entry_lsh_thr.insert(0, "0.60")
         self.entry_lsh_thr.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=4)
 
         ttk.Label(misc, text="Shingle size").grid(row=1, column=2, sticky="e", padx=(8, 4))
-        self.entry_shingle = ttk.Entry(misc, width=6)
-        self.entry_shingle.insert(0, "3")
+        self.entry_shingle = ttk.Entry(misc, width=6); self.entry_shingle.insert(0, "3")
         self.entry_shingle.grid(row=1, column=3, sticky="w", padx=(0, 8), pady=4)
 
         ttk.Label(misc, text="Max cand/doc").grid(row=2, column=0, sticky="e", padx=(8, 4))
-        self.entry_cand_doc = ttk.Entry(misc, width=8)
-        self.entry_cand_doc.insert(0, "2000")
+        self.entry_cand_doc = ttk.Entry(misc, width=8); self.entry_cand_doc.insert(0, "2000")
         self.entry_cand_doc.grid(row=2, column=1, sticky="w", padx=(0, 8), pady=4)
 
         ttk.Label(misc, text="Max total").grid(row=2, column=2, sticky="e", padx=(8, 4))
-        self.entry_cand_total = ttk.Entry(misc, width=10)
-        self.entry_cand_total.insert(0, "")
+        self.entry_cand_total = ttk.Entry(misc, width=10); self.entry_cand_total.insert(0, "")
         self.entry_cand_total.grid(row=2, column=3, sticky="w", padx=(0, 8), pady=4)
 
         for c in range(4):
             misc.grid_columnconfigure(c, weight=1)
 
-        # RIGHT: run status and quick metrics
+        # Performance section
+        perf = ttk.LabelFrame(left, text="Performance")
+        perf.pack(fill=tk.X, padx=4, pady=(0, 6))
+
+        top_perf_row = ttk.Frame(perf)
+        top_perf_row.pack(fill=tk.X, padx=6, pady=(8, 0))
+
+        ttk.Label(top_perf_row, text="Preset:").pack(side=tk.LEFT, padx=(2, 6))
+        self.perf_var = tk.StringVar(value="Auto (detect)")
+        self.cmb_perf = ttk.Combobox(
+            top_perf_row, textvariable=self.perf_var, width=22,
+            values=["Auto (detect)", "High-End", "Medium", "Light", "High-Throughput", "High-Recall", "Custom"]
+        )
+        self.cmb_perf.pack(side=tk.LEFT)
+        ttk.Button(top_perf_row, text="Apply", command=self._apply_perf_preset).pack(side=tk.LEFT, padx=(8, 6))
+
+        # Bottom row
+        bottom_perf_row = ttk.Frame(perf)
+        bottom_perf_row.pack(fill=tk.X, padx=6, pady=(6, 8))
+
+        self.var_show_perf_adv = tk.BooleanVar(value=False)
+        self.btn_toggle_perf_adv = ttk.Checkbutton(
+            bottom_perf_row, text="Advanced settings (Performance) ▸",
+            variable=self.var_show_perf_adv, command=self._toggle_perf_advanced_section,
+            style="Toolbutton"
+        )
+        self.btn_toggle_perf_adv.pack(side=tk.LEFT)
+
+        # Advanced Performance container
+        self.perf_adv_container = ttk.LabelFrame(left, text="Custom Performance Profile")
+
+        # Row 1: workers and embedding batch size
+        row1 = ttk.Frame(self.perf_adv_container)
+        row1.pack(fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(row1, text="Max CPU workers").grid(row=0, column=0, sticky="e")
+        self.entry_perf_workers = ttk.Entry(row1, width=8)
+        self.entry_perf_workers.insert(0, str(psutil.cpu_count(logical=True) or 4))
+        self.entry_perf_workers.grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        ttk.Label(row1, text="Embedding batch size").grid(row=0, column=2, sticky="e")
+        self.entry_perf_emb_batch = ttk.Entry(row1, width=8); self.entry_perf_emb_batch.insert(0, "64")
+        self.entry_perf_emb_batch.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        # Row 2: MinHash knobs
+        row2 = ttk.Frame(self.perf_adv_container)
+        row2.pack(fill=tk.X, padx=8, pady=(8, 0))
+        self.var_perf_use_minhash = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="Use MinHash approximation", variable=self.var_perf_use_minhash)\
+            .grid(row=0, column=0, sticky="w")
+        ttk.Label(row2, text="MinHash permutations").grid(row=0, column=1, sticky="e", padx=(18, 0))
+        self.entry_perf_minhash_perm = ttk.Entry(row2, width=8); self.entry_perf_minhash_perm.insert(0, "128")
+        self.entry_perf_minhash_perm.grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        # Row 3: candidate generator sizes
+        row3 = ttk.Frame(self.perf_adv_container)
+        row3.pack(fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(row3, text="Max candidates / doc").grid(row=0, column=0, sticky="e")
+        self.entry_perf_cand_per_doc = ttk.Entry(row3, width=10); self.entry_perf_cand_per_doc.insert(0, "2000")
+        self.entry_perf_cand_per_doc.grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        ttk.Label(row3, text="Max total candidates").grid(row=0, column=2, sticky="e")
+        self.entry_perf_cand_total = ttk.Entry(row3, width=12); self.entry_perf_cand_total.insert(0, "")
+        self.entry_perf_cand_total.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        # Row 4: Embedding model
+        row4 = ttk.Frame(self.perf_adv_container)
+        row4.pack(fill=tk.X, padx=8, pady=(8, 10))
+        ttk.Label(row4, text="Embedding model").grid(row=0, column=0, sticky="e")
+        self.cmb_perf_emb_model = ttk.Combobox(
+            row4, width=28, values=[
+                "fallback",
+                "all-MiniLM-L6-v2",
+                "multi-qa-MiniLM-L6-cos-v1",
+                "paraphrase-multilingual-MiniLM-L12-v2",
+            ]
+        )
+        self.cmb_perf_emb_model.set("fallback")
+        self.cmb_perf_emb_model.grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        for c in range(4):
+            row1.grid_columnconfigure(c, weight=1)
+            row2.grid_columnconfigure(c, weight=1)
+            row3.grid_columnconfigure(c, weight=1)
+            row4.grid_columnconfigure(c, weight=1)
+
+        # ---- SimHash options
+        sim_box = ttk.LabelFrame(self.perf_adv_container, text="SimHash options")
+        sim_box.pack(fill=tk.X, padx=8, pady=(0, 10))
+
+        rowS1 = ttk.Frame(sim_box); rowS1.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(rowS1, text="Hash bits").grid(row=0, column=0, sticky="e")
+        self.entry_sim_bits = ttk.Entry(rowS1, width=8); self.entry_sim_bits.insert(0, "128")
+        self.entry_sim_bits.grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        ttk.Label(rowS1, text="Mode").grid(row=0, column=2, sticky="e")
+        self.cmb_sim_mode = ttk.Combobox(rowS1, width=16, values=["unigram", "wshingle", "cngram"])
+        self.cmb_sim_mode.set("unigram")
+        self.cmb_sim_mode.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        rowS2 = ttk.Frame(sim_box); rowS2.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(rowS2, text="Word shingle size").grid(row=0, column=0, sticky="e")
+        self.entry_sim_wshingle = ttk.Entry(rowS2, width=8); self.entry_sim_wshingle.insert(0, "3")
+        self.entry_sim_wshingle.grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        ttk.Label(rowS2, text="Char n-gram").grid(row=0, column=2, sticky="e")
+        self.entry_sim_cngram = ttk.Entry(rowS2, width=8); self.entry_sim_cngram.insert(0, "5")
+        self.entry_sim_cngram.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        rowS3 = ttk.Frame(sim_box); rowS3.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(rowS3, text="Positional bucket").grid(row=0, column=0, sticky="e")
+        self.entry_sim_posbucket = ttk.Entry(rowS3, width=8); self.entry_sim_posbucket.insert(0, "0")
+        self.entry_sim_posbucket.grid(row=0, column=1, sticky="w", padx=(6, 18))
+
+        ttk.Label(rowS3, text="Min token length").grid(row=0, column=2, sticky="e")
+        self.entry_sim_minlen = ttk.Entry(rowS3, width=8); self.entry_sim_minlen.insert(0, "2")
+        self.entry_sim_minlen.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        rowS4 = ttk.Frame(sim_box); rowS4.pack(fill=tk.X, pady=(8, 10))
+        self.var_sim_norm_strict = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rowS4, text="Normalize strictly", variable=self.var_sim_norm_strict).grid(row=0, column=0, sticky="w")
+
+        self.var_sim_strip_ids = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rowS4, text="Strip dates/IDs", variable=self.var_sim_strip_ids).grid(row=0, column=1, sticky="w", padx=(18, 0))
+
+        ttk.Label(rowS4, text="Max token weight").grid(row=0, column=2, sticky="e")
+        self.entry_sim_maxw = ttk.Entry(rowS4, width=8); self.entry_sim_maxw.insert(0, "255")
+        self.entry_sim_maxw.grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        for c in range(4):
+            rowS1.grid_columnconfigure(c, weight=1)
+            rowS2.grid_columnconfigure(c, weight=1)
+            rowS3.grid_columnconfigure(c, weight=1)
+            rowS4.grid_columnconfigure(c, weight=1)
+
+        # Right: run status panel
         status = ttk.LabelFrame(right, text="Run status")
         status.pack(fill=tk.BOTH, expand=True, padx=4, pady=(6, 6))
 
         self.var_status = tk.StringVar(value="Idle")
         ttk.Label(status, textvariable=self.var_status).pack(anchor="w", padx=8, pady=(6, 0))
 
-        # elapsed timer
+        # Elapsed timer
         timer_row = ttk.Frame(status)
         timer_row.pack(fill=tk.X, padx=8, pady=(4, 8))
         ttk.Label(timer_row, text="Elapsed:").pack(side=tk.LEFT)
@@ -296,9 +512,10 @@ class App(tk.Tk):
         self.txt_summary.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.txt_summary.configure(state="disabled")
 
-        # Resource usage (toggle and panel)
+        # Resource usage
         res_toggle_row = ttk.Frame(status)
         res_toggle_row.pack(fill=tk.X, padx=8, pady=(4, 0))
+        self.res_toggle_row = res_toggle_row 
         self.var_show_res = tk.BooleanVar(value=True)
         self.btn_toggle_res = ttk.Checkbutton(
             res_toggle_row,
@@ -322,12 +539,26 @@ class App(tk.Tk):
         if _NVML_OK:
             ttk.Label(self.res_container, textvariable=self.var_res_gpu).pack(anchor="w", padx=8, pady=(0, 8))
 
-        # show by default
+        # Show by default
         self.res_container.pack(fill=tk.X, padx=8, pady=(0, 8))
+        if self.var_show_res.get():
+            self._start_resource_monitor()
 
     def _toggle_advanced_section(self):
+        """Expand/collapse the Profile advanced section."""
         show = bool(self.var_show_adv.get())
-        self.btn_toggle_adv.configure(text="Advanced settings ▾" if show else "Advanced settings ▸")
+        # If opening Profile Advanced, close Performance Advanced
+        if show and hasattr(self, 'var_show_perf_adv') and self.var_show_perf_adv.get():
+            self.var_show_perf_adv.set(False)
+            try:
+                self.perf_adv_container.pack_forget()
+            except Exception:
+                pass
+            self.btn_toggle_perf_adv.configure(text="Advanced settings (Performance) ▸")
+
+        self.btn_toggle_adv.configure(
+            text="Advanced settings (Profile) ▾" if show else "Advanced settings (Profile) ▸"
+        )
         try:
             if show:
                 self.adv_container.pack(fill=tk.X, padx=4, pady=(0, 8))
@@ -336,20 +567,279 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    # toggle for resource usage panel
+    def _toggle_perf_advanced_section(self):
+        """Expand/collapse the Performance advanced section;"""
+        show = bool(self.var_show_perf_adv.get())
+        # If opening Performance Advanced, close Profile Advanced
+        if show and hasattr(self, 'var_show_adv') and self.var_show_adv.get():
+            self.var_show_adv.set(False)
+            try:
+                self.adv_container.pack_forget()
+            except Exception:
+                pass
+            self.btn_toggle_adv.configure(text="Advanced settings (Profile) ▸")
+
+        self.btn_toggle_perf_adv.configure(
+            text="Advanced settings (Performance) ▾" if show else "Advanced settings (Performance) ▸"
+        )
+        try:
+            if show:
+                self.perf_adv_container.pack(fill=tk.X, padx=4, pady=(0, 8))
+            else:
+                self.perf_adv_container.pack_forget()
+        except Exception:
+            pass
+
+    def _apply_torch_threading(self, max_threads: int):
+        """
+        Best-effort: set thread env and torch threading so heavy math
+        will actually use the requested cores.
+        """
+        try:
+            max_threads = int(max_threads)
+        except Exception:
+            return
+        # Env knobs picked up by numpy/numexpr/openblas/mkl
+        try:
+            os.environ["OMP_NUM_THREADS"] = str(max_threads)
+            os.environ["OPENBLAS_NUM_THREADS"] = str(max_threads)
+            os.environ["MKL_NUM_THREADS"] = str(max_threads)
+            os.environ["NUMEXPR_NUM_THREADS"] = str(max_threads)
+            os.environ["PYTORCH_NUM_THREADS"] = str(max_threads)
+            # Optional: tokenizer parallelism
+            os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+        except Exception:
+            pass
+
+        # Torch runtime knobs
+        try:
+            import torch
+            # Use all cores for CPU ops
+            if hasattr(torch, "set_num_threads"):
+                torch.set_num_threads(max_threads)
+            if hasattr(torch, "set_num_interop_threads"):
+                torch.set_num_interop_threads(max_threads)
+        except Exception:
+            pass
+
+    def _apply_perf_preset(self):
+        """
+        Compute and apply performance knobs based on preset and corpus size.
+
+        The method updates both the visible UI controls and an internal
+        `_perf_overrides` dict that is consumed when building PipelineConfig.
+        """
+        preset = (self.perf_var.get() or "Auto (detect)").lower()
+        n_docs = max(1, len(self.docs))
+        Pphys = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 4
+        P = Pphys
+        RAM_GB = (psutil.virtual_memory().total or 0) / (1024**3)
+
+        # GPU snapshot
+        gpu_ok, VRAM_GB = _safe_nvml_snapshot(min_vram_gb=6.0)
+
+        bucket = "small" if n_docs < 5_000 else ("medium" if n_docs < 50_000 else "large")
+
+        # Defaults
+        workers   = min(P, 8)
+        emb_batch = 64
+        mh_perm   = 128
+        cand_doc  = 2000
+        cand_total= None
+        model     = "fallback"
+
+        # SimHash defaults
+        sim_bits       = 192 if bucket == "large" else 128
+        sim_mode       = "unigram"
+        sim_wshingle   = 3
+        sim_cngram     = 5
+        sim_posbucket  = 0
+        sim_minlen     = 2
+        sim_norm_strict= False
+        sim_strip_ids  = False
+        sim_maxw       = 255
+
+        if preset.startswith("auto"):
+            # Former _detect_best_settings logic:
+            workers   = max(2, min(12, min(Pphys, 2 + (n_docs // 10_000))))
+            if gpu_ok:
+                emb_batch = 128 + (64 if VRAM_GB >= 12 else 0)
+                model     = "all-MiniLM-L6-v2"
+            else:
+                emb_batch = 32 + (32 if RAM_GB >= 16 else 0) + (32 if RAM_GB >= 32 else 0)
+                emb_batch = min(128, emb_batch)
+                model     = "fallback"
+
+            mh_perm   = 64 if bucket == "small" else (128 if bucket == "medium" else 192)
+            cand_doc  = 1000 if bucket == "small" else (3000 if bucket == "medium" else 5000)
+            cand_total= n_docs * cand_doc
+
+            sim_bits     = 192 if bucket == "large" else 128
+            sim_mode     = "unigram" if bucket == "small" else "wshingle"
+            sim_wshingle = 3 if bucket != "large" else 4
+            sim_cngram   = 5
+            sim_posbucket= 0
+            sim_minlen   = 2
+            sim_norm_strict = False
+            sim_strip_ids   = False
+            sim_maxw        = 255
+
+            self._set_threading_env(workers, torch_intra=max(1, Pphys // 2 if gpu_ok else workers), torch_inter=1)
+
+        elif preset.startswith("light"):
+            workers   = min(P, 4)
+            emb_batch = 48 if RAM_GB >= 16 else 32
+            mh_perm   = 64
+            cand_doc  = 1000
+            cand_total= min(100_000, 20 * n_docs)
+            model     = "fallback"
+            sim_bits  = 128
+            sim_mode  = "unigram"
+            self._set_threading_env(workers, torch_intra=1, torch_inter=1)
+
+        elif preset.startswith("medium"):
+            workers   = min(P, 8)
+            if gpu_ok:
+                model = "all-MiniLM-L6-v2"; emb_batch = 128
+            else:
+                model = "fallback"; emb_batch = 64 if RAM_GB < 16 else 96
+            mh_perm   = 128
+            cand_doc  = 2000 if bucket == "small" else (3000 if bucket == "medium" else 4000)
+            cand_total= n_docs * 2000
+            sim_bits  = 128 if bucket != "large" else 192
+            sim_mode  = "unigram"
+            self._set_threading_env(workers, torch_intra=max(1, P // 2), torch_inter=1)
+
+        elif preset.startswith("high-throughput"):
+            workers   = min(P, 12)
+            model     = "fallback"
+            emb_batch = 64 if RAM_GB < 16 else (96 if RAM_GB < 32 else 128)
+            mh_perm   = 128 if bucket != "large" else 192
+            cand_doc  = 3000 if bucket == "small" else (4000 if bucket == "medium" else 5000)
+            cand_total= n_docs * 3000
+            sim_bits  = 128 if bucket != "large" else 192
+            sim_mode  = "wshingle" if bucket != "small" else "unigram"
+            sim_wshingle = 3 if bucket != "large" else 4
+            self._set_threading_env(workers, torch_intra=P, torch_inter=1)
+
+        elif preset.startswith("high-recall"):
+            workers   = min(P, 6)
+            model     = "all-MiniLM-L6-v2" if gpu_ok else "fallback"
+            emb_batch = 128 if (gpu_ok and VRAM_GB < 12) else (192 if gpu_ok else 64)
+            mh_perm   = 192 if bucket == "large" else 128
+            cand_doc  = 4000 if bucket != "large" else 6000
+            cand_total= n_docs * 4000
+            sim_bits  = 192 if bucket == "large" else 128
+            sim_mode  = "wshingle" if bucket != "small" else "unigram"
+            sim_wshingle = 3 if bucket != "large" else 4
+            self._set_threading_env(workers, torch_intra=max(1, P // 2), torch_inter=1)
+
+        else:
+            # custom: read current UI
+            try: workers   = int(self.entry_perf_workers.get() or workers)
+            except: pass
+            try: emb_batch = int(self.entry_perf_emb_batch.get() or emb_batch)
+            except: pass
+            try: mh_perm   = int(self.entry_perf_minhash_perm.get() or mh_perm)
+            except: pass
+            try: cand_doc  = int(self.entry_perf_cand_per_doc.get() or cand_doc)
+            except: pass
+            try:
+                cand_total = int(self.entry_perf_cand_total.get()) if (self.entry_perf_cand_total.get() or "").strip() else None
+            except:
+                pass
+            try: sim_bits  = int(self.entry_sim_bits.get() or sim_bits)
+            except: pass
+            sim_mode = self.cmb_sim_mode.get() or sim_mode
+            try: sim_wshingle = int(self.entry_sim_wshingle.get() or sim_wshingle)
+            except: pass
+            try: sim_cngram = int(self.entry_sim_cngram.get() or sim_cngram)
+            except: pass
+            try: sim_posbucket = int(self.entry_sim_posbucket.get() or sim_posbucket)
+            except: pass
+            try: sim_minlen = int(self.entry_sim_minlen.get() or sim_minlen)
+            except: pass
+            sim_norm_strict = bool(self.var_sim_norm_strict.get())
+            sim_strip_ids   = bool(self.var_sim_strip_ids.get())
+            try: sim_maxw = int(self.entry_sim_maxw.get() or sim_maxw)
+            except: pass
+            model = self.cmb_perf_emb_model.get() or model
+            self._set_threading_env(workers)
+
+        # Push into UI
+        self.entry_perf_workers.delete(0, tk.END); self.entry_perf_workers.insert(0, str(workers))
+        self.entry_perf_emb_batch.delete(0, tk.END); self.entry_perf_emb_batch.insert(0, str(emb_batch))
+        self.entry_perf_minhash_perm.delete(0, tk.END); self.entry_perf_minhash_perm.insert(0, str(mh_perm))
+        self.entry_perf_cand_per_doc.delete(0, tk.END); self.entry_perf_cand_per_doc.insert(0, str(cand_doc))
+        self.entry_perf_cand_total.delete(0, tk.END); self.entry_perf_cand_total.insert(0, "" if cand_total is None else str(cand_total))
+        self.cmb_perf_emb_model.set(model)
+
+        # SimHash UI
+        self.entry_sim_bits.delete(0, tk.END); self.entry_sim_bits.insert(0, str(sim_bits))
+        self.cmb_sim_mode.set(sim_mode)
+        self.entry_sim_wshingle.delete(0, tk.END); self.entry_sim_wshingle.insert(0, str(sim_wshingle))
+        self.entry_sim_cngram.delete(0, tk.END); self.entry_sim_cngram.insert(0, str(sim_cngram))
+        self.entry_sim_posbucket.delete(0, tk.END); self.entry_sim_posbucket.insert(0, str(sim_posbucket))
+        self.entry_sim_minlen.delete(0, tk.END); self.entry_sim_minlen.insert(0, str(sim_minlen))
+        self.var_sim_norm_strict.set(sim_norm_strict)
+        self.var_sim_strip_ids.set(sim_strip_ids)
+        self.entry_sim_maxw.delete(0, tk.END); self.entry_sim_maxw.insert(0, str(sim_maxw))
+
+        # Save overrides
+        self._perf_overrides = {
+            "max_workers": workers,
+            "emb_batch": emb_batch,
+            "use_minhash": bool(self.var_perf_use_minhash.get()),
+            "minhash_num_perm": mh_perm,
+            "cand_per_doc": cand_doc,
+            "cand_total": cand_total,
+            "model_name": model,
+            "simhash_bits": sim_bits,
+            "simhash_mode": sim_mode,
+            "simhash_wshingle": sim_wshingle,
+            "simhash_cngram": sim_cngram,
+            "simhash_posbucket": sim_posbucket,
+            "simhash_minlen": sim_minlen,
+            "simhash_norm_strict": sim_norm_strict,
+            "simhash_strip_ids": sim_strip_ids,
+            "simhash_maxw": sim_maxw,
+        }
+
+        if preset.startswith("high"):
+            self.var_show_perf_adv.set(True)
+            self._toggle_perf_advanced_section()
+
+        # Status line for Auto
+        if preset.startswith("auto"):
+            self.var_status.set(
+                f"Auto chose: workers={workers}, batch={emb_batch}, perms={mh_perm}, model={model}; SimHash bits={sim_bits}, mode={sim_mode}"
+            )
+
     def _toggle_resource_section(self):
+        """Expand/collapse the resource usage panel and start/stop polling."""
         show = bool(self.var_show_res.get())
         self.btn_toggle_res.configure(text="Resource usage ▾" if show else "Resource usage ▸")
         try:
             if show:
-                self.res_container.pack(fill=tk.X, padx=8, pady=(0, 8), after=self.txt_summary)
+                self.res_container.pack(fill=tk.X, padx=8, pady=(0, 8), after=self.res_toggle_row)
+                self._start_resource_monitor()
             else:
                 self.res_container.pack_forget()
+                self._stop_resource_monitor()
         except Exception:
             pass
 
+    def _on_close(self):
+        """Gracefully stop monitors and destroy the window."""
+        try:
+            self._stop_resource_monitor()
+        except Exception:
+            pass
+        self.destroy()   
+
     # Documents tab
     def _build_docs_tab(self, parent: ttk.Frame):
+        """Create the Documents management tab with add/refresh/delete actions."""
         top = ttk.Frame(parent, padding=8)
         top.pack(fill=tk.X)
 
@@ -390,6 +880,7 @@ class App(tk.Tk):
 
     # Load docs from DB
     def _refresh_docs_from_db(self):
+        """Refresh in-memory normalized document views from the database."""
         pairs = sqlite_store.get_docs_text(include_dirty=False)
         self.docs = [
             build_document_view(doc_id=did, text=(txt or ""), language=None, meta={})
@@ -399,6 +890,12 @@ class App(tk.Tk):
 
     # CSV ingestion
     def _on_add_csv(self):
+        """
+        Import a CSV into in-memory docs only.
+
+        This path does not persist to DB; it populates the UI table from a CSV
+        sample so users can quickly try the pipeline without DB ingestion.
+        """
         file_path = filedialog.askopenfilename(title="Select CSV file", filetypes=[("CSV Files", "*.csv")])
         if not file_path:
             return
@@ -413,82 +910,53 @@ class App(tk.Tk):
                 continue
             docs.append(build_document_view(doc_id=doc_id, text=normalize_text(str(text)), language=None, meta={}))
         self.docs = docs
-        self.lbl_docs.configure(text=f"Docs: {len(self.docs)}")
+        # in _on_add_csv()
+        self.lbl_doc_count.configure(text=f"{len(self.docs)} rows from CSV")
         self._csv_loaded = True
         self._refresh_docs_tab()
 
-
     # Fill docs tab table
     def _refresh_docs_tab(self):
-    # clear existing
+        """Populate the documents table from either a CSV load or the DB."""
+        # clear existing table rows
         for iid in self.docs_tree.get_children():
             self.docs_tree.delete(iid)
 
         if getattr(self, "_csv_loaded", False):
-            # show CSV docs
             for d in self.docs:
                 self.docs_tree.insert(
                     "", tk.END,
                     values=(d.doc_id, f"csv_row_{d.doc_id}", "—", len(d.text) // 1024, "CSV import")
                 )
             self.lbl_doc_count.configure(text=f"{len(self.docs)} rows from CSV")
-        else:
-            # fall back to DB
-            try:
-                rows = sqlite_store.get_all_document_files()
-            except Exception as e:
-                messagebox.showerror("DB error", str(e))
-                return
-    # clear existing
-        for iid in self.docs_tree.get_children():
-            self.docs_tree.delete(iid)
+            self.lbl_files.configure(text=f"Files: {len(self.docs)}")
+            return
 
-        if getattr(self, "_csv_loaded", False):
-            # show CSV docs
-            for d in self.docs:
-                self.docs_tree.insert(
-                    "", tk.END,
-                    values=(d.doc_id, f"csv_row_{d.doc_id}", "—", len(d.text) // 1024, "CSV import")
-                )
-            self.lbl_doc_count.configure(text=f"{len(self.docs)} rows from CSV")
-        else:
-            # fall back to DB
-            try:
-                rows = sqlite_store.get_all_document_files()
-            except Exception as e:
-                messagebox.showerror("DB error", str(e))
-                return
+        # Fall back to DB
+        try:
+            rows = sqlite_store.get_all_document_files()
+        except Exception as e:
+            messagebox.showerror("DB error", str(e))
+            return
 
-            for r in rows:
-                doc_id = r.get("doc_id", "")
-                lang = r.get("language") or "—"
-                size_kb = int((r.get("filesize") or 0) / 1024)
-                fname = r.get("filename") or "—"
-                fpath = r.get("filepath") or ""
-                self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
-            for r in rows:
-                doc_id = r.get("doc_id", "")
-                lang = r.get("language") or "—"
-                size_kb = int((r.get("filesize") or 0) / 1024)
-                fname = r.get("filename") or "—"
-                fpath = r.get("filepath") or ""
-                self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
+        for r in rows:
+            doc_id = r.get("doc_id", "")
+            lang = r.get("language") or "—"
+            size_kb = int((r.get("filesize") or 0) / 1024)
+            fname = r.get("filename") or "—"
+            fpath = r.get("filepath") or ""
+            self.docs_tree.insert("", tk.END, values=(doc_id, fname, lang, size_kb, fpath))
 
-            unique_docs = len({r.get("doc_id") for r in rows})
-            total_files = len(rows)
-            self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
-            self.lbl_files.configure(text=f"Files: {total_files}")
-            unique_docs = len({r.get("doc_id") for r in rows})
-            total_files = len(rows)
-            self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
-            self.lbl_files.configure(text=f"Files: {total_files}")
+        unique_docs = len({r.get("doc_id") for r in rows})
+        total_files = len(rows)
+        self.lbl_doc_count.configure(text=f"{total_files} files across {unique_docs} docs")
+        self.lbl_files.configure(text=f"Files: {total_files}")
 
-            self._refresh_docs_from_db()
-            self._refresh_docs_from_db()
+        # Keep the in-memory normalized views up to date
+        self._refresh_docs_from_db()
 
-
-    # helper: map doc_id -> filename (for trace labels)
     def _doc_labels_from_db(self) -> Dict[str, str]:
+        """Build a map of document IDs to a representative filename."""
         labels: Dict[str, str] = {}
         try:
             rows = sqlite_store.get_all_document_files()
@@ -503,6 +971,9 @@ class App(tk.Tk):
 
     # helper: try to pull calibrated thresholds from result
     def _thresholds_from_result(self, res: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Extract per-learner thresholds from a pipeline result snapshot.
+        """
         out: Dict[str, float] = {}
         candidates = []
         for k in ("calibration_snapshot", "calibration", "learner_states", "learners"):
@@ -520,13 +991,46 @@ class App(tk.Tk):
                     if thr is not None:
                         out[name.lower()] = float(thr)
         return out
+    
+    def _sync_calib_visibility(self):
+        """Keep learner cards in sync with the Calibration checkbox."""
+        on = bool(self.var_enable_calibration.get())
+        self.card_sim.set_calibration_enabled(on)
+        self.card_min.set_calibration_enabled(on)
+        self.card_emb.set_calibration_enabled(on)
+
+    def _bump_process_priority(self):
+        """
+        Try to raise process priority to get more CPU share during a run.
+        Works on Windows/macOS/Linux best-effort
+        """
+        try:
+            p = self._proc
+            if os.name == "nt":
+                # Windows priority class
+                import psutil as _ps
+                p.nice(_ps.HIGH_PRIORITY_CLASS)
+            else:
+                # nix: lower nice value -> higher priority, requires perms
+                p.nice(-5)
+        except Exception:
+            pass
 
     def _on_run_clicked(self):
+        """
+        Validate the current state, build a PipelineConfig, and launch the run.
+
+        Runs on a background thread, UI reflects progress via callbacks and
+        switches to a completed/error state at the end.
+        """
         if self.running:
             return
         if len(self.docs) < 2:
             messagebox.showinfo("No data", "Need at least 2 normalized docs in DB. Ingest files first (Documents tab).")
             return
+        
+        if (self.perf_var.get() or "").lower().startswith("auto"):
+            self._apply_perf_preset()
 
         # Build pipeline config from UI
         try:
@@ -534,6 +1038,9 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Config error", str(e))
             return
+
+        # Raise priority so the OS actually schedules us aggressively
+        self._bump_process_priority()
 
         # Background thread to avoid freezing UI
         self.running = True
@@ -545,6 +1052,7 @@ class App(tk.Tk):
         self._start_resource_monitor()
 
         def worker():
+            """Worker thread entry-point for the pipeline run."""
             err = None
             result = None
             try:
@@ -567,8 +1075,39 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_threading_env(self, workers: int, torch_intra: Optional[int] = None, torch_inter: int = 1):
+        """
+        Apply sane default thread env vars for BLAS stacks and PyTorch interop.
+
+        Args:
+            workers: Requested worker count.
+            torch_intra: Intra-op threads for torch (defaults to ~workers/2).
+            torch_inter: Inter-op threads for torch (usually 1 is fine).
+        """
+        try:
+            os.environ["OMP_NUM_THREADS"] = str(max(1, workers))
+            os.environ["OPENBLAS_NUM_THREADS"] = str(max(1, workers))
+            os.environ["MKL_NUM_THREADS"] = str(max(1, workers))
+            os.environ["NUMEXPR_NUM_THREADS"] = str(max(1, workers))
+        except Exception:
+            pass
+
+        try:
+            import torch
+            if torch_intra is None:
+                torch_intra = max(1, workers // 2) if workers > 1 else 1
+            torch.set_num_threads(max(1, torch_intra))
+            if hasattr(torch, "set_num_interop_threads"):
+                torch.set_num_interop_threads(max(1, torch_inter))
+        except Exception:
+            pass
+
     # Finish run on main thread
     def _finish_run(self, result: Optional[Dict[str, Any]], err: Optional[BaseException]):
+        """
+        Main-thread finalization: stop timers/monitors, render results or errors,
+        update metrics panels and learner card KPIs, and push to history.
+        """
         self.running = False
         self.btn_run.configure(state=tk.NORMAL)
         self._stop_timer()
@@ -608,6 +1147,8 @@ class App(tk.Tk):
             "thresholds": raw_snap.get("thresholds", {}),
             "consensus": raw_snap.get("consensus", {}),
             "escalations": raw_snap.get("escalations", {}),
+            "basics": raw_snap.get("basics", {}),
+            "use_calibrated": raw_snap.get("use_calibrated", False),
         }
         self.metrics_panel.update_metrics(run_summary=run_summary, snapshot=snap_norm, doc_labels=self._doc_labels_from_db())
 
@@ -615,6 +1156,7 @@ class App(tk.Tk):
         thresholds = self._thresholds_from_result(self.pipeline_result)
 
         def _num(x):
+            """Convert to float if possible"""
             try:
                 return float(x)
             except Exception:
@@ -666,6 +1208,7 @@ class App(tk.Tk):
 
     # Summary text block
     def _render_summary(self, res: Dict[str, Any]):
+        """Render an at-a-glance textual summary into the summary Text widget."""
         lines = []
         lines.append(f"Run ID: {res.get('run_id', '—')}")
         rs = res.get("run_summary") or {}
@@ -709,7 +1252,7 @@ class App(tk.Tk):
         if isinstance(er, (int, float)):
             lines.append(f"Escalations: {er * 100:.1f}%")
 
-        clusters = res.get("clusters") or []
+        clusters = res.get("clusters") or (res.get("metrics_snapshot") or {}).get("clusters") or []
         if clusters:
             lines.append(f"Clusters: {len(clusters)}")
             top = min(5, len(clusters))
@@ -723,48 +1266,82 @@ class App(tk.Tk):
 
     # Build PipelineConfig from UI
     def _make_pipeline_config(self) -> PipelineConfig:
-        # Learners
+        """
+        Translate current UI selections and overrides into a PipelineConfig.
+
+        Honors calibration toggle by forcing thresholds via the
+        learners' `extras` dicts.
+        """
         cfg_sim = self.card_sim.get_config()
         cfg_min = self.card_min.get_config()
         cfg_emb = self.card_emb.get_config()
-
-        # Arbiter
         cfg_arb = self.arbiter_panel.get_config()
 
-        # Candidates
+        # Candidate basics
+        try: lsh_thr = float(self.entry_lsh_thr.get() or "0.6")
+        except: lsh_thr = 0.6
+        try: shingle = int(self.entry_shingle.get() or "3")
+        except: shingle = 3
+        try: per_doc_default = int(self.entry_cand_doc.get() or "2000")
+        except: per_doc_default = 2000
         try:
-            lsh_thr = float(self.entry_lsh_thr.get() or "0.6")
-        except Exception:
-            lsh_thr = 0.6
-        try:
-            shingle = int(self.entry_shingle.get() or "3")
-        except Exception:
-            shingle = 3
-        try:
-            per_doc = int(self.entry_cand_doc.get() or "2000")
-        except Exception:
-            per_doc = 2000
-        try:
-            total = int(self.entry_cand_total.get()) if (self.entry_cand_total.get() or "").strip() else None
-        except Exception:
-            total = None
+            total_default = int(self.entry_cand_total.get()) if (self.entry_cand_total.get() or "").strip() else None
+        except:
+            total_default = None
 
+        if not getattr(self, "_perf_overrides", None):
+            self._apply_perf_preset()
+        ov = dict(self._perf_overrides or {})
+
+        cand_per_doc = int(ov.get("cand_per_doc", per_doc_default))
+        cand_total = ov.get("cand_total", total_default)
         cfg_cand = CandidateConfig(
             use_lsh=True,
             shingle_size=shingle,
-            num_perm=64,
+            num_perm=int(ov.get("minhash_num_perm", 128)),
             lsh_threshold=lsh_thr,
-            max_candidates_per_doc=per_doc,
-            max_total_candidates=total,
+            max_candidates_per_doc=cand_per_doc,
+            max_total_candidates=cand_total,
         )
 
-        # Bootstrap and self-learning
         cfg_boot = BootstrapConfig(max_pos_pairs=50_000, max_neg_pairs=50_000)
-        try:
-            epochs = int(self.entry_sl_epochs.get() or "2")
-        except Exception:
-            epochs = 2
+        try: epochs = int(self.entry_sl_epochs.get() or "2")
+        except: epochs = 2
         cfg_sl = SelfLearningConfig(enabled=bool(self.var_sl_enable.get()), epochs=epochs)
+        calibration_enabled = bool(self.var_enable_calibration.get())
+
+        # Embedding
+        emb_ex = dict(cfg_emb.extras or {})
+        if "max_workers" in ov: emb_ex["max_workers"] = int(ov["max_workers"])
+        if "emb_batch" in ov:  emb_ex["batch_size"]  = int(ov["emb_batch"])
+        if "model_name" in ov and (ov["model_name"] or "").strip():
+            emb_ex["model_name"] = str(ov["model_name"]).strip()
+        if not calibration_enabled:
+            emb_ex["force_threshold"] = True
+        cfg_emb.extras = emb_ex
+
+        # MinHash
+        min_ex = dict(cfg_min.extras or {})
+        if "use_minhash" in ov:           min_ex["use_minhash"] = bool(ov["use_minhash"])
+        if "minhash_num_perm" in ov:      min_ex["num_perm"]    = int(ov["minhash_num_perm"])
+        if not calibration_enabled:
+            min_ex["force_threshold"] = True
+        cfg_min.extras = min_ex
+
+        # SimHash
+        sim_ex = dict(cfg_sim.extras or {})
+        if "simhash_bits" in ov:          sim_ex["hash_bits"]        = int(ov["simhash_bits"])
+        if "simhash_mode" in ov:          sim_ex["simhash_mode"]     = str(ov["simhash_mode"])
+        if "simhash_wshingle" in ov:      sim_ex["shingle_size"]     = int(ov["simhash_wshingle"])
+        if "simhash_cngram" in ov:        sim_ex["char_ngram"]       = int(ov["simhash_cngram"])
+        if "simhash_posbucket" in ov:     sim_ex["pos_bucket"]       = int(ov["simhash_posbucket"])
+        if "simhash_minlen" in ov:        sim_ex["min_token_len"]    = int(ov["simhash_minlen"])
+        if "simhash_norm_strict" in ov:   sim_ex["normalize_strict"] = bool(ov["simhash_norm_strict"])
+        if "simhash_strip_ids" in ov:     sim_ex["strip_dates_ids"]  = bool(ov["simhash_strip_ids"])
+        if "simhash_maxw" in ov:          sim_ex["max_token_weight"] = int(ov["simhash_maxw"])
+        if not calibration_enabled:
+            sim_ex["force_threshold"] = True
+        cfg_sim.extras = sim_ex
 
         return PipelineConfig(
             simhash=cfg_sim,
@@ -775,49 +1352,73 @@ class App(tk.Tk):
             bootstrap=cfg_boot,
             self_learning=cfg_sl,
             persist=True,
+            disable_calibration=not calibration_enabled,
         )
 
     def _apply_preset(self):
+        """
+        Apply a high-level detection preset to learner configs and arbiter.
+
+        Presets primarily adjust target precision, gray-zone margin, epochs,
+        and initial decision thresholds.
+        """
         preset = (self.profile_var.get() or "Balanced").lower()
 
-        # Update learners
+        # Pull current configs
         sim_cfg = self.card_sim.get_config()
         min_cfg = self.card_min.get_config()
         emb_cfg = self.card_emb.get_config()
-
-        # Update arbiter
         arb_cfg = self.arbiter_panel.get_config()
 
+        # Defaults
         if preset.startswith("balanced"):
             target = 0.98
             gray = 0.05
             epochs = "2"
+            thr_sim = thr_min = 0.75
+            thr_emb = 0.988
         elif preset.startswith("high"):
             target = 0.995
             gray = 0.04
             epochs = "1"
+            thr_sim = thr_min = 0.88
+            thr_emb = 0.994
         elif preset.startswith("recall"):
             target = 0.95
             gray = 0.06
             epochs = "3"
+            thr_sim = thr_min = 0.60
+            thr_emb = 0.975
         else:
             return
 
+        # Apply target precision
         sim_cfg.target_precision = target
         min_cfg.target_precision = target
         emb_cfg.target_precision = target
-        arb_cfg.gray_zone_margin = gray
 
+        # Apply thresholds via extras
+        sim_ex = dict(sim_cfg.extras or {}); sim_ex["decision_threshold"] = float(thr_sim); sim_cfg.extras = sim_ex
+        min_ex = dict(min_cfg.extras or {}); min_ex["decision_threshold"] = float(thr_min); min_cfg.extras = min_ex
+        emb_ex = dict(emb_cfg.extras or {}); emb_ex["cosine_threshold"] = float(thr_emb); emb_cfg.extras = emb_ex
+
+        # Arbiter and epochs
+        arb_cfg.gray_zone_margin = gray
+        self.arbiter_panel.set_config(arb_cfg)
+        self.entry_sl_epochs.delete(0, tk.END); self.entry_sl_epochs.insert(0, epochs)
+
+        # Push updated configs back into the UI
         self.card_sim.set_config(sim_cfg)
         self.card_min.set_config(min_cfg)
         self.card_emb.set_config(emb_cfg)
-        self.arbiter_panel.set_config(arb_cfg)
-
-        self.entry_sl_epochs.delete(0, tk.END)
-        self.entry_sl_epochs.insert(0, epochs)
 
     # Documents tab actions
     def _on_add_files(self):
+        """
+        Open a file picker and ingest selected documents into the database.
+
+        Supported extensions: .pdf, .docx, .txt
+        """
         if _ingestion_mod is None:
             messagebox.showerror("Missing ingestion", "ingestion.py not found.")
             return
@@ -830,6 +1431,11 @@ class App(tk.Tk):
         self._ingest_paths(list(paths))
 
     def _on_add_folder(self):
+        """
+        Recursively ingest a folder containing supported files into the database.
+
+        Supported extensions: .pdf, .docx, .txt
+        """
         if _ingestion_mod is None:
             messagebox.showerror("Missing ingestion", "ingestion.py not found.")
             return
@@ -848,6 +1454,7 @@ class App(tk.Tk):
         self._ingest_paths(paths)
 
     def _on_delete_selected_docs(self):
+        """Delete selected document IDs and refresh the table."""
         selected = [self.docs_tree.item(iid, "values")[0] for iid in self.docs_tree.selection()]
         if not selected:
             return
@@ -859,70 +1466,19 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Delete failed", str(e))
 
-    """def _ingest_paths(self, paths: Iterable[str]):
-        ps = list(paths)
-        self.doc_status = getattr(self, "doc_status", None)
-        if self.doc_status:
-            self.doc_status.configure(text=f"Ingesting {len(ps)} files…")
-            self.update_idletasks()
-
-        def worker(plist: List[str]):
-            ok = 0
-            fail = 0
-            for p in plist:
-                try:
-                    self._ingest_file(p)
-                    ok += 1
-                    if self.doc_status:
-                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
-                except Exception:
-                    fail += 1
-                    if self.doc_status:
-                        self.after(0, lambda o=ok, f=fail: self.doc_status.configure(text=f"Ingesting… ok={o} fail={f}"))
-            if self.doc_status:
-                self.after(0, lambda: [self._refresh_docs_tab(),
-                                       self.doc_status.configure(text=f"Done. ok={ok}, fail={fail}")])
-
-        threading.Thread(target=worker, args=(ps,), daemon=True).start()
-
-    def _ingest_file(self, path: str):
-        data = _ingestion_mod.extract_document(path)
-        raw_text = data.get("raw_text") or ""
-        meta = data.get("metadata") or {}
-
-        # make one document per file-version
-        import hashlib, os
-        abs_path = os.path.abspath(path)
-        try:
-            mtime_ns = os.stat(path).st_mtime_ns
-        except Exception:
-            mtime_ns = 0
-
-        doc_id = hashlib.sha1(f"{abs_path}|{mtime_ns}".encode("utf-8", errors="ignore")).hexdigest()
-
-        norm = normalize_text(raw_text)
-
-        # write to DB
-        sqlite_store.upsert_document(
-            doc_id=doc_id,
-            raw_text=raw_text,
-            normalized_text=norm,
-            meta={
-                "language": meta.get("language"),
-                "filesize": meta.get("filesize") or 0,
-            },
-        )
-
-        # file mapping
-        sqlite_store.add_file_mapping(doc_id, path, mtime_ns)
-"""
     def _ingest_paths(self, paths: Iterable[str]):
+        """
+        Ingest a list of absolute/relative file paths into the database.
+
+        Work occurs on a background thread, UI status is updated incrementally.
+        """
         ps = list(paths)
         if self.doc_status:
             self.doc_status.configure(text=f"Ingesting {len(ps)} files…")
             self.update_idletasks()
 
         def worker(plist: List[str]):
+            """Background ingestion worker that batches DB writes for throughput."""
             docs_batch = []
             mappings_batch = []
             ok = 0
@@ -944,9 +1500,18 @@ class App(tk.Tk):
 
             # Batch insert at the end
             if docs_batch:
-                sqlite_store.batch_upsert_documents(docs_batch)
+                if hasattr(sqlite_store, "batch_upsert_documents"):
+                    sqlite_store.batch_upsert_documents(docs_batch)
+                else:
+                    for (doc_id, raw, norm, meta_s) in docs_batch:
+                        sqlite_store.upsert_document(doc_id, raw, norm, json.loads(meta_s))
+
             if mappings_batch:
-                sqlite_store.batch_add_file_mappings(mappings_batch)
+                if hasattr(sqlite_store, "batch_add_file_mappings"):
+                    sqlite_store.batch_add_file_mappings(mappings_batch)
+                else:
+                    for (doc_id, abs_path, mtime_ns) in mappings_batch:
+                        sqlite_store.add_file_mapping(doc_id, abs_path, mtime_ns)
 
             if self.doc_status:
                 self.after(0, lambda: [self._refresh_docs_tab(),
@@ -954,8 +1519,10 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, args=(ps,), daemon=True).start()
 
-
     def _ingest_file(self, path: str, return_batch: bool = False):
+        """
+        Extract raw text and metadata from a file and upsert into the DB.
+        """
         data = _ingestion_mod.extract_document(path)
         raw_text = data.get("raw_text") or ""
         meta = data.get("metadata") or {}
@@ -971,14 +1538,20 @@ class App(tk.Tk):
 
         if return_batch:
             # Return tuples for batch insertion
-            doc_entry = (doc_id, raw_text, norm, str({
-                "language": meta.get("language"),
-                "filesize": meta.get("filesize") or 0
-            }))
+            doc_entry = (
+                doc_id,
+                raw_text,
+                norm,
+                json.dumps({
+                    "language": meta.get("language"),
+                    "filesize": meta.get("filesize") or 0,
+                }),
+            )
+
             mapping_entry = (doc_id, abs_path, mtime_ns)
             return doc_entry, mapping_entry
 
-        # legacy behavior: single insert
+        # Legacy behavior: single insert
         sqlite_store.upsert_document(
             doc_id=doc_id,
             raw_text=raw_text,
@@ -990,16 +1563,19 @@ class App(tk.Tk):
         )
         sqlite_store.add_file_mapping(doc_id, abs_path, mtime_ns)
 
-
-    # helpers: counters and timer
-
+    # Helpers: counters and timer
     def _reset_counters(self):
+        """Reset the live counters in the run status panel."""
         self.var_cnt_pairs.set("Pairs: —")
         self.var_cnt_exact.set("Exact-duplicate: —")
         self.var_cnt_near.set("Near-duplicate: —")
         self.var_cnt_unc.set("Uncertain: —")
 
     def _update_counters_from_result(self, res: Dict[str, Any]):
+        """
+        Update the live counters from the run result, compute from traces if
+        not present in the summary for robustness.
+        """
         rs = res.get("run_summary") or {}
         pairs = rs.get('pairs_scored') or rs.get('total_pairs') or rs.get('pairs')
         if pairs is not None:
@@ -1032,10 +1608,12 @@ class App(tk.Tk):
             self.var_cnt_unc.set(f"Uncertain: {uc}")
 
     def _start_timer(self):
+        """Start the elapsed wall-clock timer."""
         self._run_start_ts = time.time()
         self._tick_timer()
 
     def _stop_timer(self):
+        """Stop the elapsed timer and finalize the display."""
         if self._elapsed_job:
             try:
                 self.after_cancel(self._elapsed_job)
@@ -1048,6 +1626,7 @@ class App(tk.Tk):
         self._run_start_ts = None
 
     def _tick_timer(self):
+        """Timer callback: update elapsed and reschedule self."""
         if self._run_start_ts is None:
             return
         elapsed = int(time.time() - self._run_start_ts)
@@ -1056,6 +1635,7 @@ class App(tk.Tk):
 
     @staticmethod
     def _fmt_hms(seconds: int) -> str:
+        """Format seconds as HH:MM:SS."""
         h = seconds // 3600
         m = (seconds % 3600) // 60
         s = seconds % 60
@@ -1063,6 +1643,9 @@ class App(tk.Tk):
 
     # Resource monitor
     def _start_resource_monitor(self):
+        """Begin periodic resource polling."""
+        if self._res_job:
+            return
         try:
             psutil.cpu_percent(interval=None)
             self._proc.cpu_percent(interval=None)
@@ -1071,6 +1654,7 @@ class App(tk.Tk):
         self._poll_resources()
 
     def _stop_resource_monitor(self):
+        """Cancel the scheduled resource polling job if present."""
         if self._res_job:
             try:
                 self.after_cancel(self._res_job)
@@ -1080,6 +1664,7 @@ class App(tk.Tk):
 
     @staticmethod
     def _fmt_bytes(n: int) -> str:
+        """Human-readable binary size formatter (B, KiB, MiB, GiB, TiB)."""
         try:
             n = float(n)
         except Exception:
@@ -1090,6 +1675,9 @@ class App(tk.Tk):
             n /= 1024.0
 
     def _gpu_summary_text(self) -> Optional[str]:
+        """
+        Build a concise GPU utilization/VRAM summary string, if NVML available.
+        """
         if not _NVML_OK:
             return None
         try:
@@ -1106,7 +1694,8 @@ class App(tk.Tk):
                 used = mem.used / (1024**3)
                 total = mem.total / (1024**3)
                 try:
-                    name = pynvml.nvmlDeviceGetName(h).decode("utf-8", errors="ignore")
+                    name_obj = pynvml.nvmlDeviceGetName(h)
+                    name = name_obj.decode("utf-8", "ignore") if isinstance(name_obj, (bytes, bytearray)) else str(name_obj)
                 except Exception:
                     name = f"GPU{i}"
                 parts.append(f"{name}: {util.gpu}% · VRAM {used:.1f}/{total:.1f} GiB")
@@ -1120,12 +1709,13 @@ class App(tk.Tk):
             return None
 
     def _poll_resources(self):
+        """Poll process/system metrics and reflect them in the resource panel."""
         try:
             with self._proc.oneshot():
-                # psutil returns process CPU % on a single core scale
+                # raw process CPU % (can be >100% because it's sum across cores)
                 raw_proc = self._proc.cpu_percent(interval=None)
                 cores = psutil.cpu_count(logical=True) or 1
-                norm = raw_proc / float(cores)  # normalize
+                norm = raw_proc / float(cores)  # normalized to system-wide %
 
                 mem_info = self._proc.memory_full_info()
                 rss = mem_info.rss
@@ -1136,7 +1726,9 @@ class App(tk.Tk):
                 threads_cnt = self._proc.num_threads()
 
             # Update labels
-            self.var_res_cpu.set(f"App CPU: {norm:.1f}% of system  (raw {raw_proc:.1f}%)")
+            self.var_res_cpu.set(
+                f"App CPU: {raw_proc:.1f}% raw  ({norm:.1f}% of system across {cores} cores)"
+            )
             self.var_res_mem.set(f"App RAM: {self._fmt_bytes(rss)}  ({mem_percent:.1f}%)")
             self.var_res_io.set(f"Open files: {open_files_cnt}   Threads: {threads_cnt}")
 
@@ -1155,11 +1747,15 @@ class App(tk.Tk):
 
 
 def main():
+    """Entry point: launch the Tkinter application loop."""
     App().mainloop()
 
 
-# import first 500 rows from a CSV file with text column field only
+# Import first 500 rows from a CSV file with text column field only
 def import_rows_from_csv(csv_path="dataset/True.csv"):
+    """
+    Convenience utility to insert a randomized sample of CSV rows into the DB.
+    """
     try:
         df = pd.read_csv(csv_path)
     except Exception as e:
@@ -1173,7 +1769,7 @@ def import_rows_from_csv(csv_path="dataset/True.csv"):
 
     # Sample 1500 random rows
     if len(df) < 1500:
-        print(f"⚠️ CSV has only {len(df)} rows, sampling all available.")
+        print(f"CSV has only {len(df)} rows, sampling all available.")
         sampled_df = df.copy()
     else:
         sampled_df = df.sample(n=1500, random_state=random.randint(0, 9999))
@@ -1209,7 +1805,6 @@ def import_rows_from_csv(csv_path="dataset/True.csv"):
 
     print("Imported 2000 CSV rows into database.")
 
+
 if __name__ == "__main__":
-    # Comment out the below function as needed to insert more data from CSV
-    # import_rows_from_csv() 
     main()

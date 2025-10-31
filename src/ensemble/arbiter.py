@@ -15,10 +15,27 @@ from src.learners.base import (
     LearnerState,
     PairLabel,
     CorpusStats,
-    CalibrationParams,
-    make_fresh_state,
     stable_pair_key,
 )
+
+"""
+Arbiter
+
+Fusion layer that combines multiple near-duplicate learners (SimHash, MinHash, Embedding)
+and produces a final decision per-doc pair:
+
+    - DUPLICATE
+    - NON_DUPLICATE
+    - UNCERTAIN   (falls in the gray zone, eligible for escalation)
+
+Key responsibilities:
+* Run all learners and apply voting/consensus.
+* Consider exact duplicate short-circuit (hash-based, canonicalized).
+* Handle gray zone vs. confident decisions using per-learner thresholds.
+* Optionally escalate (normalize stricter, alter MinHash shingle size, whiten embeddings).
+* Provide a decision trace for explainability (raw scores, calibrated probs, thresholds, steps).
+* Support pseudo-label generation for self-learning rounds.
+"""
 
 FinalLabel = Literal["DUPLICATE", "NON_DUPLICATE", "UNCERTAIN"]
 DupKind = Literal["EXACT", "NEAR"]
@@ -29,9 +46,9 @@ class ArbiterConfig:
     gray_zone_margin: float = 0.05
     max_escalation_steps: int = 3
     escalation_order: List[str] = field(default_factory=lambda: [
-        "normalize_strict",
-        "minhash_alt_shingle",
-        "embed_whiten",
+        "normalize_strict", # tighten normalization, strip IDs/dates
+        "minhash_alt_shingle", # try alternate shingle size on MinHash to escape false ties
+        "embed_whiten", # whiten embeddings / remove top PCs to reduce topical bias
     ])
     max_self_train_epochs: int = 2
     strong_margin: float = 0.07
@@ -40,10 +57,17 @@ class ArbiterConfig:
     near_support_min_band: float = 0.02
     enable_exact_check: bool = True
     exact_normalization: Literal["none", "line_endings", "unicode_lines"] = "unicode_lines"
-
+    use_calibrated: bool = True
 
 @dataclass
 class DecisionTrace:
+    """
+    For each pair, record everything needed to explain the result:
+    - learner raw scores and probabilities (calibrated or raw per config)
+    - threshold values used for comparison (if available)
+    - final label, reason, escalation steps taken and which learners agreed
+    - duplicate kind (EXACT vs NEAR) when applicable
+    """
     pair_key: str
     a_id: str
     b_id: str
@@ -56,7 +80,13 @@ class DecisionTrace:
     near_voters: List[str] = field(default_factory=list)
     agreed_learners: List[str] = field(default_factory=list)
 
+    use_calibrated: bool = True
+
     def as_dict(self) -> Dict[str, Any]:
+        """
+        Produce a JSON-serializable dict that’s safe to store in run history
+        and render in decision trace UIs.
+        """
         out: Dict[str, Any] = {
             "pair_key": self.pair_key,
             "a_id": self.a_id,
@@ -69,8 +99,14 @@ class DecisionTrace:
             "near_voters": list(self.near_voters),
             "agreed_learners": list(self.agreed_learners),
             "learners": {},
+            "use_calibrated": bool(self.use_calibrated),
         }
         def _disp3(x: float) -> float:
+            """
+            Display helper:
+            - round down to 3 decimals (floor) to avoid overconfidence in UI
+            - clamp < 1.0 for non-exact reasons
+            """
             from math import floor
             try:
                 x = float(x)
@@ -80,13 +116,19 @@ class DecisionTrace:
                 x = min(x, 0.999999)
             return floor(x * 1000.0) / 1000.0
         for k, v in self.learner_outputs.items():
+            # Compare/display probability depends on calibration switch
+            p_display = v.prob if self.use_calibrated else v.raw_score
+            thr_display = None if v.threshold is None else float(v.threshold)
+
+
             entry = {
-                "raw_score": _disp3(float(v.raw_score)),
-                "prob": _disp3(float(v.prob)),
-                "threshold": None if v.threshold is None else float(v.threshold),
+                "raw_score": _disp3(v.raw_score),
+                "prob": _disp3(p_display),
+                "threshold": thr_display,
                 "rationale": v.rationale,
                 "warnings": v.warnings,
             }
+            # Convenience: if the rationale contains an internal similarity, provide a display copy
             try:
                 if isinstance(v.rationale, dict) and "similarity_est" in v.rationale:
                     rr = dict(v.rationale)
@@ -100,14 +142,22 @@ class DecisionTrace:
 
 @dataclass
 class LearningUpdate:
+    """
+    Container for reporting learner state updates.
+    """
     learner_name: str
     updated_state: LearnerState
     notes: str = ""
 
 
 class Arbiter:
-
+    """
+    Orchestrates the multi-learner decision pipeline for near-duplicate detection.
+    """
     def __init__(self, learners: List[ILearner], config: Optional[ArbiterConfig] = None):
+        """
+        Initialize the Arbiter with a list of learners and a configuration.
+        """
         if not learners:
             raise ValueError("Arbiter requires at least one learner")
         self.learners: List[ILearner] = [ln for ln in learners if ln.config.enabled]
@@ -116,19 +166,29 @@ class Arbiter:
         self.config: ArbiterConfig = config or ArbiterConfig()
 
     def prepare(self, corpus_stats: Optional[CorpusStats] = None) -> None:
+        """
+        Allow learners to pre-compute any corpus-dependent state.
+        """
         for ln in self.learners:
             ln.prepare(corpus_stats)
 
     def calibrate_from_bootstrap(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> List[LearningUpdate]:
+        """
+        Ask each learner to fit its calibration (probability mapping and threshold) from bootstrap sets.
+        """
         updates: List[LearningUpdate] = []
         for ln in self.learners:
             st = ln.fit_calibration(positives, negatives)
             updates.append(LearningUpdate(learner_name=ln.name, updated_state=st, notes="bootstrap calibration"))
         return updates
 
-    # exact duplicate helpers
+
+    # Exact duplicate helpers
 
     def _doc_text(self, dv: DocumentView) -> str:
+        """
+        Safely extract the textual payload from a DocumentView variant.
+        """        
         if hasattr(dv, "text") and getattr(dv, "text") is not None:
             return dv.text
         if hasattr(dv, "content") and getattr(dv, "content") is not None:
@@ -136,113 +196,179 @@ class Arbiter:
         return ""
 
     def _canonicalize_for_exact(self, s: str) -> str:
+        """
+        Canonicalize text before hashing for exact-duplicate detection according to config.
+        """        
         mode = self.config.exact_normalization
         if mode in ("line_endings", "unicode_lines"):
             s = s.replace("\r\n", "\n").replace("\r", "\n")
         if mode == "unicode_lines":
+            # Remove BOM if present, NFC to coalesce canonically equivalent sequences
             if s.startswith("\ufeff"):
                 s = s.lstrip("\ufeff")
             s = unicodedata.normalize("NFC", s)
         return s
 
     def _exact_hash(self, dv: DocumentView) -> str:
+        """
+        Hash (SHA-256) of canonicalized text for exact duplicate detection.
+        """        
         text = self._doc_text(dv)
         text = self._canonicalize_for_exact(text)
         return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
     def _is_exact_duplicate(self, a: DocumentView, b: DocumentView) -> bool:
+        """
+        Constant-time equivalent of exact text equality under chosen canonicalization.
+        """
         if not self.config.enable_exact_check:
             return False
         return self._exact_hash(a) == self._exact_hash(b)
 
-    # voting helpers
+
+    # Voting helpers
 
     def _learner_by_name(self, name: str) -> Optional[ILearner]:
+        """
+        Retrieve a learner instance by its name.
+        """
         for ln in self.learners:
             if ln.name == name:
                 return ln
         return None
 
     def _threshold_of(self, learner_name: str) -> Optional[float]:
+        """
+        Return the learner's calibrated threshold.
+        """
+        if not getattr(self.config, "use_calibrated", True):
+            return None
         ln = self._learner_by_name(learner_name)
         if not ln:
             return None
-        return ln.get_state().calibration.threshold
+        st = ln.get_state()
+        cal = getattr(st, "calibration", None)
+        return getattr(cal, "threshold", None) if cal is not None else None
+
 
     def _required_votes(self) -> int:
+        """
+        The effective number of learners needed to agree, bounded by the number of active learners.
+        """        
         return max(1, min(self.config.require_agreement, len(self.learners)))
 
     def _votes(self, learner_name: str, out: LearnerOutput) -> bool:
+        """
+        Decide whether a single learner considers a pair a duplicate.
+
+        Voting logic:
+        1) Embedding backstop cosine threshold (robust guardrail for high cosine).
+        2) If calibrated: compare calibrated prob vs. calibrated threshold, also respect min_confidence.
+        3) If uncalibrated: consult per-learner explicit thresholds in config.extras, else min_confidence.
+        """
         ln = self._learner_by_name(learner_name)
         min_conf = ln.config.min_confidence if ln else None
 
         # Embedding backstop
         try:
             if ln and ln.name.lower().startswith("embedding"):
-                cos_floor = float(ln.config.extras.get("cosine_threshold", 0.97) or 0.97)
-
-                # Prefer true cosine in rationale
+                # Strong cosine floor to capture near-identical texts even if calibration is off/noisy
+                cos_floor = float((ln.config.extras or {}).get("cosine_threshold", 0.97))
                 cos_val = None
                 if isinstance(out.rationale, dict) and "cosine" in out.rationale:
-                    try:
-                        cos_val = float(out.rationale["cosine"])
-                    except Exception:
-                        cos_val = None
+                    try: cos_val = float(out.rationale["cosine"])
+                    except Exception: cos_val = None
                 if cos_val is None and out.raw_score is not None:
-                    # unit->cosine: cos = 2*raw - 1
-                    try:
-                        cos_val = 2.0 * float(out.raw_score) - 1.0
-                    except Exception:
-                        cos_val = None
-
+                    # Convert prob-like raw_score back to cosine if needed
+                    try: cos_val = 2.0 * float(out.raw_score) - 1.0
+                    except Exception: cos_val = None
                 if cos_val is not None and cos_val >= cos_floor:
                     return True
         except Exception:
             pass
 
-        # Calibrated probability vs threshold
-        if out.threshold is not None:
-            if min_conf is not None and out.prob < min_conf:
-                return False
-            return out.prob >= out.threshold
+        use_cal = getattr(self.config, "use_calibrated", True)
 
+        # Choose the comparison value
+        p = out.prob if use_cal else out.raw_score
+        if p is None:
+            return False
+
+        if use_cal and out.threshold is not None:
+            # Respect per-learner min_conf as an additional floor for certainty     
+            if min_conf is not None and p < min_conf:
+                return False
+            return p >= out.threshold
+
+        # Uncalibrated path:
+        thr = None
+        if ln:
+            ex = ln.config.extras or {}
+            if ln.name.lower().startswith("embedding"):
+                thr = ex.get("cosine_threshold")
+            else:
+                thr = ex.get("decision_threshold")
+            try:
+                thr = float(thr) if thr is not None else None
+            except Exception:
+                thr = None
+
+        if thr is not None:
+            return p >= thr
         if min_conf is not None:
-            return out.prob >= min_conf
+            return p >= min_conf
         return False
 
+
+
     def _all_clearly_below(self, outputs: Dict[str, LearnerOutput]) -> bool:
+        """
+        True if all learners' probabilities are comfortably below their thresholds
+        by at least gray_zone_margin. Only applies when calibrated thresholds exist.
+        """
         saw_any = False
         for name, out in outputs.items():
             th = self._threshold_of(name)
-            if th is None:
+            if th is None or out.prob is None:
                 continue
             saw_any = True
             if out.prob >= (th - self.config.gray_zone_margin):
                 return False
         return saw_any
 
+
     def _in_gray_zone(self, outputs: Dict[str, LearnerOutput]) -> bool:
+        """
+        True if at least one calibrated learner is near its threshold, within gray zone,
+        and none are confidently above/below.
+        """        
         saw_any = False
         for name, out in outputs.items():
             th = self._threshold_of(name)
-            if th is None:
+            if th is None or out.prob is None:
                 continue
             saw_any = True
             if abs(out.prob - th) > self.config.gray_zone_margin:
                 return False
         return saw_any
 
-    # main scoring
+
+    # Main scoring
 
     def score_pair(self, a: DocumentView, b: DocumentView) -> DecisionTrace:
+        """
+        Score a single document pair via:
+        exact duplicate short-circuit -> base scoring -> gray-zone checks -> escalation if needed.
+        """
         need = self._required_votes()
+        uc = bool(self.config.use_calibrated)
 
         # 0) exact short circuit
         if self._is_exact_duplicate(a, b):
             synthetic: Dict[str, LearnerOutput] = {}
             exact_voters = []
             for ln in self.learners:
-                th = ln.get_state().calibration.threshold
+                th = self._threshold_of(ln.name)
                 synthetic[ln.name] = LearnerOutput(
                     raw_score=1.0,
                     prob=1.0,
@@ -264,6 +390,7 @@ class Arbiter:
                 exact_voters=exact_voters,
                 near_voters=[],
                 agreed_learners=exact_voters[:],
+                use_calibrated=uc,
             )
 
         # 1) base scoring
@@ -282,6 +409,7 @@ class Arbiter:
                 exact_voters=[],
                 near_voters=sorted(agreed),
                 agreed_learners=sorted(agreed),
+                use_calibrated=uc,
             )
 
         # 2) clearly below
@@ -298,6 +426,7 @@ class Arbiter:
                 exact_voters=[],
                 near_voters=[],
                 agreed_learners=[],
+                use_calibrated=uc,
             )
 
         # 3) confident non-duplicate
@@ -314,6 +443,7 @@ class Arbiter:
                 exact_voters=[],
                 near_voters=[],
                 agreed_learners=[],
+                use_calibrated=uc,
             )
 
         # 4) escalation loop
@@ -331,6 +461,7 @@ class Arbiter:
                 exact_voters=[],
                 near_voters=sorted(agreed_after),
                 agreed_learners=sorted(agreed_after),
+                use_calibrated=uc,
             )
 
         if self._all_clearly_below(outputs):
@@ -346,6 +477,7 @@ class Arbiter:
                 exact_voters=[],
                 near_voters=[],
                 agreed_learners=[],
+                use_calibrated=uc,
             )
 
         # 5) unresolved
@@ -361,15 +493,25 @@ class Arbiter:
             exact_voters=[],
             near_voters=[],
             agreed_learners=[],
+            use_calibrated=uc,
         )
 
     def batch_score(self, pairs: Iterable[Pair]) -> List[DecisionTrace]:
+        """
+        Convenience: score a batch of pairs, preserving order.
+        """        
         traces: List[DecisionTrace] = []
         for a, b in pairs:
             traces.append(self.score_pair(a, b))
         return traces
 
     def build_pseudo_labels(self, traces: Iterable[DecisionTrace]) -> List[PairLabel]:
+        """
+        Build high-confidence pseudo-labels from traces for self-training.
+
+        - Positive label if >= required votes are strongly above threshold by strong_margin.
+        - Negative label if all learners are strongly below threshold by strong_margin.
+        """        
         labels: List[PairLabel] = []
         t_strong = self.config.strong_margin
         need = self._required_votes()
@@ -392,6 +534,9 @@ class Arbiter:
         return labels
 
     def self_training_round(self, pseudo_labels: Iterable[PairLabel]) -> List[LearningUpdate]:
+        """
+        Execute one round of self-training across learners with provided pseudo-labels.
+        """        
         updates: List[LearningUpdate] = []
         pls = list(pseudo_labels)
         if not pls:
@@ -402,6 +547,14 @@ class Arbiter:
         return updates
 
     def run_self_learning_loop(self, pairs: Iterable[Pair], epochs: Optional[int] = None) -> Dict[str, Any]:
+        """
+        - score current pairs,
+        - extract confident pseudo-labels,
+        - self-train learners,
+        - record epoch summary.
+
+        Stops early if no pseudo labels are produced.
+        """
         ep = epochs if epochs is not None else self.config.max_self_train_epochs
         history: List[Dict[str, Any]] = []
         for e in range(ep):
@@ -418,9 +571,13 @@ class Arbiter:
                 break
         return {"epochs_run": len(history), "history": history}
 
-    # internals
+
+    # Internals
 
     def _score_all(self, a: DocumentView, b: DocumentView) -> Dict[str, LearnerOutput]:
+        """
+        Run all learners on a single pair and collect outputs keyed by learner name.
+        """        
         outputs: Dict[str, LearnerOutput] = {}
         for ln in self.learners:
             outputs[ln.name] = ln.score_pair(a, b)
@@ -432,6 +589,10 @@ class Arbiter:
         b: DocumentView,
         initial_outputs: Dict[str, LearnerOutput],
     ) -> Tuple[Dict[str, LearnerOutput], List[str], List[str]]:
+        """
+        Apply escalation steps in order, attempting to move an in-gray-zone pair to a confident decision.
+
+        """
         originals: Dict[str, LearnerConfig] = {ln.name: ln.config for ln in self.learners}
         steps_done: List[str] = []
         current_outputs = dict(initial_outputs)
@@ -458,6 +619,9 @@ class Arbiter:
         return current_outputs, final_agreed, steps_done
 
     def _apply_escalation_step(self, step: str) -> None:
+        """
+        Mutate learner configurations for a single escalation action, then re-prepare learners.
+        """
         for ln in self.learners:
             cfg = LearnerConfig(
                 enabled=ln.config.enabled,
@@ -465,7 +629,7 @@ class Arbiter:
                 min_confidence=ln.config.min_confidence,
                 max_pairs_per_epoch=ln.config.max_pairs_per_epoch,
                 random_state=ln.config.random_state,
-                extras=dict(ln.config.extras),
+                extras=dict(ln.config.extras or {})
             )
             if step == "normalize_strict":
                 cfg.extras["normalize_strict"] = True
@@ -480,6 +644,9 @@ class Arbiter:
             ln.prepare(None)
 
     def _restore_configs(self, originals: Dict[str, LearnerConfig]) -> None:
+        """
+        Restore original learner configs after escalation attempts.
+        """        
         for ln in self.learners:
             if ln.name in originals:
                 ln.configure(originals[ln.name])

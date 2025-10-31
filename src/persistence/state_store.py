@@ -74,21 +74,22 @@ def ensure_state_schema() -> None:
 def save_learner_state(name: str, state: LearnerState) -> None:
     ensure_state_schema()
     payload = serialize_state(state)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO learners (name, state_json, version, updated_at)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(name) DO UPDATE SET
-            state_json=excluded.state_json,
-            version=excluded.version,
-            updated_at=CURRENT_TIMESTAMP
-        """,
-        (name, payload, int(state.version)),
-    )
-    conn.commit()
-    conn.close()
+    # sqlite3 connections act as context managers: commit on success, rollback on exception
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO learners (name, state_json, version, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(name) DO UPDATE SET
+                state_json=excluded.state_json,
+                version=excluded.version,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (name, payload, int(state.version)),
+        )
+        conn.commit()
+
 
 # Load a learner state
 def load_learner_state(name: str) -> Optional[LearnerState]:
@@ -166,7 +167,7 @@ def insert_decision(run_id: int, trace: DecisionTrace) -> None:
     ensure_state_schema()
     conn = get_conn()
     cur = conn.cursor()
-    consensus = ",".join(trace.agreed_learners)
+    consensus = ",".join(sorted(trace.agreed_learners))
     label_int = _LABEL_TO_INT.get(trace.final_label, -1)
     trace_json = json.dumps(trace.as_dict(), ensure_ascii=False)
     cur.execute(
@@ -190,7 +191,7 @@ def bulk_insert_decisions(run_id: int, traces: Iterable[DecisionTrace]) -> None:
     cur = conn.cursor()
     rows = []
     for tr in traces:
-        consensus = ",".join(tr.agreed_learners)
+        consensus = ",".join(sorted(tr.agreed_learners))
         label_int = _LABEL_TO_INT.get(tr.final_label, -1)
         trace_json = json.dumps(tr.as_dict(), ensure_ascii=False)
         rows.append((run_id, tr.pair_key, tr.a_id, tr.b_id, label_int, consensus, trace_json))
@@ -286,7 +287,10 @@ def get_decisions(
             (run_id, int(limit), int(offset)),
         ).fetchall()
     else:
-        lv = _LABEL_TO_INT.get(label, -1)
+        if label not in _LABEL_TO_INT:
+            conn.close()
+            return []
+        lv = _LABEL_TO_INT[label]
         rows = cur.execute(
             "SELECT pair_key, doc1, doc2, final_label, consensus, trace_json FROM decisions WHERE run_id=? AND final_label=? LIMIT ? OFFSET ?",
             (run_id, lv, int(limit), int(offset)),

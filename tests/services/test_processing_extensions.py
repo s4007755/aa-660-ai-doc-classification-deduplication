@@ -19,3 +19,4 @@ def test_directory_ingestion_skips_pdf_docx():
         assert not any("c.docx" in s for s in sources)
 
 
+

@@ -266,6 +266,13 @@ class TestLabelManagement:
         """Test successfully adding label to collection."""
         classifier, mock_qdrant = mock_classifier
         
+        # Mock collection info with dimension
+        mock_qdrant.get_collection_info.return_value = {
+            "dimension": 1536,
+            "vector_count": 0,
+            "embedding_model": "text-embedding-3-small"
+        }
+        
         # Mock next ID reservation
         mock_qdrant._reserve_id_block.return_value = 100
         
@@ -287,6 +294,13 @@ class TestLabelManagement:
     def test_add_label_without_description(self, mock_classifier):
         """Test adding label without explicit description."""
         classifier, mock_qdrant = mock_classifier
+        
+        # Mock collection info with dimension
+        mock_qdrant.get_collection_info.return_value = {
+            "dimension": 1536,
+            "vector_count": 0,
+            "embedding_model": "text-embedding-3-small"
+        }
         
         # Mock description generation
         with patch.object(classifier, '_generate_label_description') as mock_gen_desc:
@@ -425,6 +439,13 @@ class TestLabelStorage:
             "2": {"label": "Technology", "description": "Tech content", "enriched": True}
         }
         
+        # Mock collection info with dimension
+        mock_qdrant.get_collection_info.return_value = {
+            "dimension": 1536,
+            "vector_count": 0,
+            "embedding_model": "text-embedding-3-small"
+        }
+        
         # Mock next ID reservation
         mock_qdrant._reserve_id_block.return_value = 100
         
@@ -497,6 +518,12 @@ class TestConvenienceFunctions:
         from src.pipelines.classification.classifier import add_label_to_collection
         
         mock_qdrant = Mock()
+        # Mock collection info with dimension
+        mock_qdrant.get_collection_info.return_value = {
+            "dimension": 1536,
+            "vector_count": 0,
+            "embedding_model": "text-embedding-3-small"
+        }
         mock_qdrant._reserve_id_block.return_value = 100
         
         with patch('src.pipelines.classification.classifier.embed') as mock_embed:

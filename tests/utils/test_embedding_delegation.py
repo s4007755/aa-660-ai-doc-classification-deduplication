@@ -18,3 +18,4 @@ def test_embed_falls_back_on_error(mock_gen):
     assert len(out[0]) > 10
 
 
+

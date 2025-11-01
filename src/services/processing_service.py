@@ -8,6 +8,7 @@ Provides document ingestion, CSV processing, and file operations.
 from typing import List, Dict, Any, Optional, Tuple
 import os
 import csv
+import json
 import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -75,8 +76,9 @@ class ProcessingService:
             texts = []
             payloads = []
 
-            # Get all files from directory with document extensions
-            extensions = ['.txt', '.md', '.docx', '.pdf', '.html']
+            # Get all files from directory with supported extensions (recursive)
+            # Supported: text files and document files that can be parsed
+            extensions = ['.txt', '.md', '.html', '.pdf', '.docx']
             all_files = directory_enumerator(directory_path, extensions, limit)
 
             # Apply limit if specified
@@ -95,6 +97,9 @@ class ProcessingService:
 
                 for file_path in batch_files:
                     try:
+                        # Get file extension for metadata extraction
+                        ext = os.path.splitext(file_path)[1].lower()
+                        
                         # Read file content with proper encoding handling
                         content = self.extract_text_from_file(file_path)
 
@@ -135,13 +140,36 @@ class ProcessingService:
                                     self.log(f"Truncated file {file_path} from {original_length} to {len(content)} characters")
 
                             texts.append(content)
-                            payloads.append({
+                            
+                            # Build payload with metadata
+                            payload = {
                                 "source": file_path,
                                 "hash": hash_text(content),
                                 "type": "file",
                                 "text_content": content[:800],  # Store first 800 chars for better cluster naming
                                 "original_length": original_length if original_length > len(content) else None
-                            })
+                            }
+                            
+                            # Add PDF/DOCX metadata if available (optional, won't fail if import errors)
+                            if ext in ['.pdf', '.docx']:
+                                try:
+                                    from src.utils.ingestion import extract_document
+                                    result = extract_document(file_path)
+                                    metadata = result.get('metadata', {})
+                                    if metadata:
+                                        payload.update({
+                                            "filename": metadata.get("filename"),
+                                            "filesize": metadata.get("filesize"),
+                                            "language": metadata.get("language"),
+                                            "mime_type": metadata.get("mime_type"),
+                                            "title": metadata.get("title"),
+                                            "author": metadata.get("author"),
+                                            "created": metadata.get("created"),
+                                        })
+                                except (ImportError, Exception):
+                                    pass  # Metadata extraction failed (import error or other), use basic payload
+                            
+                            payloads.append(payload)
 
                     except Exception as e:
                         self.log(f"Failed to read file {file_path}: {e}", True)
@@ -455,9 +483,10 @@ class ProcessingService:
                     result["type"] = "directory"
                     result["readable"] = os.access(path, os.R_OK)
                     
-                    # Count files in directory
+                    # Count files in directory (recursive search)
                     try:
-                        files = directory_enumerator(path)
+                        extensions = ['.txt', '.md', '.html', '.pdf', '.docx']
+                        files = directory_enumerator(path, extensions)
                         result["info"] = {
                             "file_count": len(files),
                             "files": files[:10]  # First 10 files as sample
@@ -525,7 +554,8 @@ class ProcessingService:
                         
             elif validation["type"] == "directory":
                 try:
-                    files = directory_enumerator(path)
+                    extensions = ['.txt', '.md', '.html', '.pdf', '.docx']
+                    files = directory_enumerator(path, extensions)
                     stats.update({
                         "file_count": len(files),
                         "files": files[:20]  # First 20 files
@@ -546,6 +576,7 @@ class ProcessingService:
     def extract_text_from_file(self, file_path: str) -> str:
         """
         Extract text content from a file with robust encoding handling.
+        Supports: .txt, .md, .html, .pdf, .docx
         
         Args:
             file_path: Path to the file
@@ -553,6 +584,46 @@ class ProcessingService:
         Returns:
             Extracted text content
         """
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        # Use ingestion pipeline for PDF and DOCX
+        if ext in ['.pdf', '.docx']:
+            try:
+                # Try to import and use the ingestion pipeline
+                try:
+                    from src.utils.ingestion import extract_document
+                    result = extract_document(file_path)
+                    return result.get('raw_text', '').strip()
+                except ImportError as import_err:
+                    # If there's an import error, try alternative extraction methods
+                    self.log(f"Import error for ingestion pipeline, trying alternative methods: {import_err}", True)
+                    
+                    if ext == '.pdf':
+                        try:
+                            from pypdf import PdfReader
+                            reader = PdfReader(file_path)
+                            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+                            return text.strip()
+                        except Exception as pdf_err:
+                            self.log(f"Failed to extract PDF text from '{file_path}': {pdf_err}", True)
+                            return ""
+                    
+                    elif ext == '.docx':
+                        try:
+                            import docx
+                            doc = docx.Document(file_path)
+                            text = "\n".join(para.text for para in doc.paragraphs)
+                            return text.strip()
+                        except Exception as docx_err:
+                            self.log(f"Failed to extract DOCX text from '{file_path}': {docx_err}", True)
+                            return ""
+                    
+                    return ""
+            except Exception as e:
+                self.log(f"Failed to extract text from '{file_path}' (PDF/DOCX): {e}", True)
+                return ""
+        
+        # Handle text files (.txt, .md, .html)
         try:
             # Try UTF-8 first
             with open(file_path, "r", encoding="utf-8") as f:
@@ -582,8 +653,6 @@ class ProcessingService:
             True if successful, False otherwise
         """
         try:
-            import json
-            
             data = {
                 "texts": texts,
                 "payloads": payloads,

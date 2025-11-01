@@ -9,7 +9,6 @@ from typing import List, Dict, Any, Optional, Tuple
 import threading
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
-from src.core import Collection, DistanceMetric
 
 
 class QdrantService:
@@ -423,13 +422,15 @@ class QdrantService:
             filtered_vectors = []
             filtered_payloads = []
             duplicate_hashes = []
-            
+
             if sqlite_service:
                 self.log("Checking for duplicates using SQLite hash index...")
                 for vec, payload in zip(vectors, payloads):
                     if 'hash' in payload:
                         hash_value = payload['hash']
-                        if sqlite_service.is_duplicate(collection_name, hash_value):
+                        dup = sqlite_service.is_duplicate(collection_name, hash_value)
+                        # Only treat as duplicate when the service explicitly returns True
+                        if isinstance(dup, bool) and dup:
                             duplicate_hashes.append(hash_value)
                         else:
                             filtered_vectors.append(vec)
@@ -649,6 +650,82 @@ class QdrantService:
         except Exception as e:
             self.log(f"Failed to update payload: {e}", True)
             return False
+
+    def update_payload_batch(self, collection_name: str, point_ids: List[int], payloads: List[Dict[str, Any]]) -> Tuple[bool, int]:
+        """
+        Batch update payloads using Qdrant's official batch_update_points API.
+        
+        Uses micro-batches for optimal performance and reliability.
+
+        Args:
+            collection_name: Collection name
+            point_ids: List of point IDs
+            payloads: List of payload dictionaries, one per point
+
+        Returns:
+            Tuple of (all_successful, successful_count)
+        """
+        if not self.connected:
+            self.log("Cannot update payload: not connected to Qdrant.", True)
+            return False, 0
+
+        if len(point_ids) != len(payloads):
+            self.log("update_payload_batch: point_ids and payloads length mismatch", True)
+            return False, 0
+
+        from qdrant_client import models
+        
+        successful_count = 0
+        max_retries = 2
+        micro_batch_size = 1000  # Process 1000 operations per batch
+        
+        # Process in micro-batches
+        for i in range(0, len(point_ids), micro_batch_size):
+            batch_ids = point_ids[i:i + micro_batch_size]
+            batch_payloads = payloads[i:i + micro_batch_size]
+            
+            # Create SetPayloadOperation objects
+            operations = [
+                models.SetPayloadOperation(
+                    set_payload=models.SetPayload(
+                        payload=pl,
+                        points=[pid]
+                    )
+                )
+                for pid, pl in zip(batch_ids, batch_payloads)
+            ]
+            
+            success = False
+            for attempt in range(max_retries):
+                try:
+                    # Use official batch_update_points API
+                    self.client.batch_update_points(
+                        collection_name=collection_name,
+                        update_operations=operations,
+                        wait=True
+                    )
+                    successful_count += len(batch_ids)
+                    success = True
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        self.log(f"Failed to update batch starting at index {i}: {e}", True)
+                        # Fallback to individual updates for this batch
+                        for pid, pl in zip(batch_ids, batch_payloads):
+                            try:
+                                self.client.set_payload(
+                                    collection_name=collection_name,
+                                    payload=pl,
+                                    points=[pid]
+                                )
+                                successful_count += 1
+                            except Exception:
+                                pass
+        
+        all_ok = (successful_count == len(point_ids))
+        return all_ok, successful_count
     
     def delete_points(self, collection_name: str, point_ids: List[int]) -> bool:
         """
@@ -666,9 +743,10 @@ class QdrantService:
                 self.log("Cannot delete points: not connected to Qdrant.", True)
                 return False
             
+            from qdrant_client import models
             self.client.delete(
                 collection_name=collection_name,
-                points_selector=point_ids
+                points_selector=models.PointIdsList(points=point_ids)
             )
             
             self.log(f"Deleted {len(point_ids)} points from collection '{collection_name}'")

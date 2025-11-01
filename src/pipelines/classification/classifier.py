@@ -9,11 +9,17 @@ This module provides comprehensive document classification functionality includi
 """
 
 import json
+import os
+from typing import List
+
+PAGING_LIMIT = 10000
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
+from qdrant_client.models import PointStruct
 from src.utils.embedding import embed
 from src.utils.hash_utils import HashUtils
+import openai
+from datetime import datetime
 
 
 class DocumentClassifier:
@@ -32,6 +38,36 @@ class DocumentClassifier:
         self.qdrant_service = qdrant_service
         self.log = log_function or print
         
+    def _allocate_point_ids(self, collection_name: str, count: int) -> int:
+        """Allocate point ID(s) using the available service method for compatibility.
+        Returns the starting ID for the allocated range.
+        """
+        # Use modern block reservation if available
+        if hasattr(self.qdrant_service, "_reserve_id_block"):
+            try:
+                return int(self.qdrant_service._reserve_id_block(collection_name, count))
+            except Exception:
+                pass
+        # Fallback: find max existing ID (best-effort) to avoid collisions
+        try:
+            client = self.qdrant_service.client
+            info = client.get_collection(collection_name)
+            limit = min(max(int(getattr(info, 'points_count', 0)) * 2, 1000), 20000)
+            try:
+                points, _ = client.scroll(collection_name=collection_name, limit=limit, with_payload=False, with_vectors=False)
+                max_id = 0
+                for p in points or []:
+                    try:
+                        max_id = max(max_id, int(getattr(p, 'id', 0)))
+                    except Exception:
+                        continue
+                return max_id + 1
+            except Exception:
+                # Last resort: points_count + 1
+                return int(getattr(info, 'points_count', 0)) + 1
+        except Exception:
+            return 1
+
     def load_taxonomy(self, taxonomy_path):
         """
         Load taxonomy from a JSON file.
@@ -103,64 +139,172 @@ class DocumentClassifier:
                 label_names.append(label_data.get('label', str(label_data)) if isinstance(label_data, dict) else str(label_data))
                 label_ids.append(label_id)
             
-            # Generate embeddings for labels
-            label_embeddings = embed(label_texts)
+            # Get collection info first to determine the correct embedding model
+            collection_info = self.qdrant_service.get_collection_info(collection_name)
+            if not collection_info:
+                return {"success": False, "error": "Failed to get collection info"}
+            
+            total_points = collection_info['vector_count']
+            expected_dim = collection_info.get('dimension')
+            
+            # Determine embedding model from collection
+            collection_model = collection_info.get('embedding_model')
+            if not collection_model:
+                # Infer model from dimension
+                if expected_dim == 1536:
+                    collection_model = "text-embedding-3-small"
+                elif expected_dim == 3072:
+                    collection_model = "text-embedding-3-large"
+                elif expected_dim == 512 or expected_dim == 1024 or expected_dim == 768:
+                    collection_model = "text-embedding-ada-002"
+                else:
+                    collection_model = "text-embedding-3-small"  # fallback
+            
+            # Generate embeddings for labels using the collection's model
+            label_embeddings = embed(label_texts, model=collection_model)
             
             if not label_embeddings:
                 return {"success": False, "error": "Failed to generate label embeddings"}
             
-            # Get collection info to check size
-            collection_info = self.qdrant_service.get_collection_info(collection_name)
-            total_points = collection_info['vector_count']
+            # Validate label embedding dimensions match collection
+            if label_embeddings and len(label_embeddings) > 0:
+                label_dim = len(label_embeddings[0])
+                if expected_dim and label_dim != expected_dim:
+                    return {"success": False, "error": f"Label embedding dimension mismatch: collection vectors are {expected_dim}D but label embeddings are {label_dim}D. Ensure labels are generated with the same model as the collection."}
             
-            # Process all vectors - use a large limit to ensure we get all points
+            # Process all vectors with pagination to avoid backend caps
             self.log(f"Retrieving all {total_points} vectors for classification...")
-            points_list, _ = self.qdrant_service.scroll_vectors(
-                collection_name, max(total_points * 2, 1000), with_payload=True, with_vectors=True
-            )
+            points_list = []
+            page_offset = None
+            page_limit = 10000
+            while True:
+                page_points, page_offset = self.qdrant_service.scroll_vectors(
+                    collection_name,
+                    page_limit,
+                    with_payload=True,
+                    with_vectors=True,
+                    page_offset=page_offset
+                )
+                if not page_points:
+                    break
+                points_list.extend(page_points)
+                if not page_offset:
+                    break
             
             if not points_list:
                 return {"success": False, "error": "No vectors found in collection"}
             
-            # Filter out metadata point (ID 0)
+            # Filter out metadata point (ID 0) and None vectors
             data_points = [p for p in points_list if not p.get('payload', {}).get('_metadata')]
+            data_points = [p for p in data_points if p.get('vector') is not None]  # Filter None vectors
             
             if not data_points:
-                return {"success": False, "error": "No data vectors found in collection"}
+                return {"success": False, "error": "No valid data vectors found in collection"}
             
             vectors = np.array([point['vector'] for point in data_points])
             point_ids = [point['id'] for point in data_points]
+            
+            # Validate vector dimensions match expected dimension
+            if len(vectors) > 0:
+                actual_dim = vectors.shape[1]
+                if expected_dim and actual_dim != expected_dim:
+                    return {"success": False, "error": f"Vector dimension mismatch: expected {expected_dim}D but got {actual_dim}D"}
+                
+                # Validate label embeddings dimension matches
+                if label_embeddings and len(label_embeddings) > 0:
+                    label_dim = len(label_embeddings[0])
+                    if actual_dim != label_dim:
+                        return {"success": False, "error": f"Vector dimension mismatch: collection vectors are {actual_dim}D but label embeddings are {label_dim}D"}
             
             # Calculate cosine similarity and classify
             self.log("Classifying documents...")
             similarities = cosine_similarity(vectors, label_embeddings)
             predicted_indices = np.argmax(similarities, axis=1)
             
-            # Update vectors with classifications
+            # Validate indices are within bounds (defensive check)
+            num_labels = len(label_names)
+            if num_labels == 0:
+                return {"success": False, "error": "No labels available for classification"}
+            
+            # Update payloads in batches (each point has its own payload)
+            # Uses official batch_update_points API for speed
             classified_count = 0
+            batch_size = 1000
+            batched_ids: List[int] = []
+            batched_payloads: List[dict] = []
+            
             for i, (point_id, pred_idx) in enumerate(zip(point_ids, predicted_indices)):
-                predicted_label = label_names[pred_idx]
-                predicted_label_id = label_ids[pred_idx]
-                confidence = similarities[i][pred_idx]
-                
-                success = self.qdrant_service.update_payload(
-                    collection_name=collection_name,
-                    point_ids=[point_id],
-                    payload={
-                        "predicted_label": predicted_label,
-                        "predicted_label_id": predicted_label_id,
-                        "confidence": float(confidence),
-                        "classification_method": "cosine_similarity"
-                    }
-                )
-                
-                if not success:
-                    self.log(f"Failed to update payload for point {point_id}", True)
+                # Validate index is within bounds
+                if pred_idx < 0 or pred_idx >= num_labels:
+                    self.log(f"Warning: Invalid prediction index {pred_idx} for point {point_id}, skipping", True)
                     continue
-                classified_count += 1
+                
+                batched_ids.append(point_id)
+                batched_payloads.append({
+                    "predicted_label": label_names[pred_idx],
+                    "predicted_label_id": label_ids[pred_idx],
+                    "confidence": float(similarities[i][pred_idx]),
+                    "classification_method": "cosine_similarity"
+                })
+                
+                if len(batched_ids) >= batch_size:
+                    ok, success_count = self.qdrant_service.update_payload_batch(
+                        collection_name, batched_ids, batched_payloads
+                    )
+                    classified_count += success_count
+                    if success_count < len(batched_ids):
+                        self.log(f"Warning: Only {success_count}/{len(batched_ids)} updates succeeded in this batch", True)
+                    self.log(f"Updated {classified_count}/{len(point_ids)} documents...")
+                    batched_ids, batched_payloads = [], []
+
+            # Flush remainder
+            if batched_ids:
+                ok, success_count = self.qdrant_service.update_payload_batch(
+                    collection_name, batched_ids, batched_payloads
+                )
+                classified_count += success_count
+                if success_count < len(batched_ids):
+                    self.log(f"Warning: Only {success_count}/{len(batched_ids)} updates succeeded in final batch", True)
+            
+            self.log(f"Updated {classified_count}/{len(point_ids)} documents.")
             
             self.log(f"Classification completed! Classified {classified_count} documents.")
             
+            # Update collection metadata with labels summary (cache for API)
+            try:
+                label_counts: dict[str, int] = {}
+                page_offset = None
+                while True:
+                    points_page, page_offset = self.qdrant_service.scroll_vectors(
+                        collection_name,
+                        PAGING_LIMIT,
+                        with_payload=True,
+                        with_vectors=False,
+                        page_offset=page_offset
+                    )
+                    if not points_page:
+                        break
+                    for p in points_page:
+                        payload = p.get('payload', {}) or {}
+                        if payload.get('_metadata'):
+                            continue
+                        label = payload.get('predicted_label')
+                        if label:
+                            label_counts[label] = label_counts.get(label, 0) + 1
+                    if not page_offset:
+                        break
+
+                self.qdrant_service.update_collection_metadata(
+                    collection_name,
+                    {
+                        "labels_summary": label_counts,
+                        "labels_summary_updated_at": datetime.now().isoformat(),
+                        "total_documents": len(data_points),
+                    }
+                )
+            except Exception as meta_err:
+                self.log(f"Warning: failed to update labels summary in metadata: {meta_err}", True)
+
             return {
                 "success": True,
                 "classified_count": classified_count,
@@ -201,7 +345,7 @@ class DocumentClassifier:
             self.log(f"Label enrichment failed: {e}", True)
             return {"success": False, "error": str(e)}
     
-    def add_label_to_collection(self, collection_name, label_name, description=None):
+    def add_label_to_collection(self, collection_name, label_name, description=None, enrich=False):
         """
         Add a new label to the collection.
         
@@ -209,35 +353,64 @@ class DocumentClassifier:
             collection_name: Name of the collection
             label_name: Name of the label to add
             description: Optional description for the label
+            enrich: If True and no description is provided, generate an AI description
             
         Returns:
             dict: Addition results
         """
         try:
-            # Generate AI description if not provided
-            if not description:
-                description = self._generate_label_description(label_name)
+            # Determine description and enrichment flag (opt-in enrichment)
+            final_description = description
+            enriched_flag = False
+            if not description and enrich:
+                final_description = self._generate_label_description(label_name)
+                enriched_flag = True
             
-            # Generate embedding for the label
+            # Get collection info first to determine the correct embedding model
+            collection_info = self.qdrant_service.get_collection_info(collection_name)
+            if not collection_info:
+                return {"success": False, "error": "Failed to get collection info"}
+            
+            expected_dim = collection_info.get('dimension')
+            
+            # Determine embedding model from collection
+            collection_model = collection_info.get('embedding_model')
+            if not collection_model:
+                # Infer model from dimension
+                if expected_dim == 1536:
+                    collection_model = "text-embedding-3-small"
+                elif expected_dim == 3072:
+                    collection_model = "text-embedding-3-large"
+                elif expected_dim == 512 or expected_dim == 1024 or expected_dim == 768:
+                    collection_model = "text-embedding-ada-002"
+                else:
+                    collection_model = "text-embedding-3-small"  # fallback
+            
+            # Generate embedding for the label using collection's model
             label_text = label_name
-            if description:
-                label_text += f": {description}"
+            if final_description:
+                label_text += f": {final_description}"
             
-            embeddings = embed([label_text])
+            embeddings = embed([label_text], model=collection_model)
             if not embeddings:
                 return {"success": False, "error": "Failed to generate label embedding"}
             
-            # Get next available ID
+            # Validate embedding dimension matches collection
+            actual_dim = len(embeddings[0]) if embeddings else 0
+            if expected_dim and actual_dim != expected_dim:
+                return {"success": False, "error": f"Embedding dimension mismatch: collection expects {expected_dim}D but got {actual_dim}D. Ensure the embedding model matches the collection's model."}
+            
+            # Reserve one ID for this label
             label_id = f"custom_{len(label_name)}_{HashUtils.generate_deterministic_seed(label_name, 1000)}"
-            point_id = self.qdrant_service._get_next_id(collection_name)
+            point_id = self._allocate_point_ids(collection_name, 1)
             
             # Create label metadata
             metadata = {
                 "label_id": label_id,
                 "label_name": label_name,
-                "description": description,
+                "description": final_description,
                 "type": "label",
-                "enriched": True,
+                "enriched": enriched_flag,
                 "custom": True,
                 "hash": HashUtils.create_label_hash(label_id, label_text)
             }
@@ -277,24 +450,14 @@ class DocumentClassifier:
     def _enrich_labels_data(self, labels_data):
         """Enrich labels with AI-generated descriptions."""
         try:
-            from openai import OpenAI
-            
-            # Try to import API key with proper error handling
-            try:
-                from src.pipelines.classification.credentials import OPENAI_API_KEY
-            except ImportError:
-                import os
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-            except Exception as e:
-                self.log(f"Warning: Could not load credentials file: {e}", True)
-                import os
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+            # Centralized: use environment variable only
+            OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":
                 self.log("No valid OpenAI API key found. Skipping enrichment.", True)
                 return labels_data
             
-            client = OpenAI(api_key=OPENAI_API_KEY)
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
             
             enriched_data = {}
             for label_id, label_data in labels_data.items():
@@ -331,23 +494,13 @@ class DocumentClassifier:
     def _generate_label_description(self, label_name, existing_desc=""):
         """Generate AI description for a label."""
         try:
-            from openai import OpenAI
-            
-            # Try to import API key with proper error handling
-            try:
-                from src.pipelines.classification.credentials import OPENAI_API_KEY
-            except ImportError:
-                import os
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-            except Exception as e:
-                self.log(f"Warning: Could not load credentials file: {e}", True)
-                import os
-                OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+            # Centralized: use environment variable only
+            OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
             
             if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here" or OPENAI_API_KEY.strip() == "":
                 return f"Content related to {label_name.lower()} topics and themes."
             
-            client = OpenAI(api_key=OPENAI_API_KEY)
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
             
             prompt = f"""
 Generate a concise, professional description for the label "{label_name}".
@@ -376,6 +529,27 @@ Return only the description, no additional text.
         try:
             self.log("Storing labels in collection...")
             
+            # Get collection info to determine the correct embedding model
+            collection_info = self.qdrant_service.get_collection_info(collection_name)
+            if not collection_info:
+                self.log("Failed to get collection info.", True)
+                return
+            
+            expected_dim = collection_info.get('dimension')
+            
+            # Determine embedding model from collection
+            collection_model = collection_info.get('embedding_model')
+            if not collection_model:
+                # Infer model from dimension
+                if expected_dim == 1536:
+                    collection_model = "text-embedding-3-small"
+                elif expected_dim == 3072:
+                    collection_model = "text-embedding-3-large"
+                elif expected_dim == 512 or expected_dim == 1024 or expected_dim == 768:
+                    collection_model = "text-embedding-ada-002"
+                else:
+                    collection_model = "text-embedding-3-small"  # fallback
+            
             # Generate embeddings for labels
             label_texts = []
             label_metadata = []
@@ -395,15 +569,22 @@ Return only the description, no additional text.
                     "hash": HashUtils.create_label_hash(label_id, label_text)
                 })
             
-            # Generate embeddings
-            label_embeddings = embed(label_texts)
+            # Generate embeddings using collection's model
+            label_embeddings = embed(label_texts, model=collection_model)
             
             if not label_embeddings:
                 self.log("Failed to generate label embeddings.", True)
                 return
             
-            # Get next available IDs
-            start_id = self.qdrant_service._get_next_id(collection_name)
+            # Validate dimensions match
+            if len(label_embeddings) > 0:
+                actual_dim = len(label_embeddings[0])
+                if expected_dim and actual_dim != expected_dim:
+                    self.log(f"Warning: Embedding dimension mismatch: collection expects {expected_dim}D but got {actual_dim}D", True)
+                    return
+            
+            # Reserve a contiguous ID block for all labels
+            start_id = self._allocate_point_ids(collection_name, len(label_embeddings))
             
             # Create label points
             points = []
@@ -422,30 +603,33 @@ Return only the description, no additional text.
             self.log(f"Failed to store labels: {e}", True)
     
     def _load_labels_from_collection(self, collection_name):
-        """Load labels from collection."""
+        """Load labels from collection with pagination to ensure completeness."""
         try:
-            # Query for label points
-            points_list, _ = self.qdrant_service.scroll_vectors(
-                collection_name, 1000, with_payload=True, with_vectors=False,
-                filter_conditions={"type": "label"}
-            )
-            
-            if not points_list:
-                return {}
-            
             labels_data = {}
-            for point in points_list:
-                payload = point.get('payload', {})
-                label_id = payload.get('label_id')
-                if label_id:
-                    labels_data[label_id] = {
-                        'label': payload.get('label_name', ''),
-                        'description': payload.get('description', ''),
-                        'enriched': payload.get('enriched', False)
-                    }
-            
+            next_offset = None
+            while True:
+                points_list, next_offset = self.qdrant_service.scroll_vectors(
+                    collection_name,
+                    1000,
+                    with_payload=True,
+                    with_vectors=False,
+                    filter_conditions={"type": "label"},
+                    page_offset=next_offset
+                )
+                if not points_list:
+                    break
+                for point in points_list:
+                    payload = point.get('payload', {})
+                    label_id = payload.get('label_id')
+                    if label_id:
+                        labels_data[label_id] = {
+                            'label': payload.get('label_name', ''),
+                            'description': payload.get('description', ''),
+                            'enriched': payload.get('enriched', False)
+                        }
+                if not next_offset:
+                    break
             return labels_data
-            
         except Exception as e:
             self.log(f"Failed to load labels from collection: {e}", True)
             return {}
@@ -464,7 +648,7 @@ def enrich_labels(vecdb_client, labels_file, store_in_collection=False, collecti
     return classifier.enrich_labels(labels_file, store_in_collection, collection_name)
 
 
-def add_label_to_collection(vecdb_client, collection_name, label_name, description=None, log_function=None):
+def add_label_to_collection(vecdb_client, collection_name, label_name, description=None, enrich=False, log_function=None):
     """Convenience function for adding labels to collection."""
     classifier = DocumentClassifier(vecdb_client, log_function)
-    return classifier.add_label_to_collection(collection_name, label_name, description)
+    return classifier.add_label_to_collection(collection_name, label_name, description, enrich=enrich)

@@ -68,8 +68,8 @@ MODEL_PRICES = {
 }
 
 MAX_TOKENS = {
-    "text-embedding-3-small": 8192,
-    "text-embedding-3-large": 8192,
+    "text-embedding-3-small": 8191,
+    "text-embedding-3-large": 8191,
     "text-embedding-ada-002": 8191,
 }
 

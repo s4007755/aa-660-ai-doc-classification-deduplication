@@ -139,15 +139,38 @@ class DocumentClassifier:
                 label_names.append(label_data.get('label', str(label_data)) if isinstance(label_data, dict) else str(label_data))
                 label_ids.append(label_id)
             
-            # Generate embeddings for labels
-            label_embeddings = embed(label_texts)
+            # Get collection info first to determine the correct embedding model
+            collection_info = self.qdrant_service.get_collection_info(collection_name)
+            if not collection_info:
+                return {"success": False, "error": "Failed to get collection info"}
+            
+            total_points = collection_info['vector_count']
+            expected_dim = collection_info.get('dimension')
+            
+            # Determine embedding model from collection
+            collection_model = collection_info.get('embedding_model')
+            if not collection_model:
+                # Infer model from dimension
+                if expected_dim == 1536:
+                    collection_model = "text-embedding-3-small"
+                elif expected_dim == 3072:
+                    collection_model = "text-embedding-3-large"
+                elif expected_dim == 512 or expected_dim == 1024 or expected_dim == 768:
+                    collection_model = "text-embedding-ada-002"
+                else:
+                    collection_model = "text-embedding-3-small"  # fallback
+            
+            # Generate embeddings for labels using the collection's model
+            label_embeddings = embed(label_texts, model=collection_model)
             
             if not label_embeddings:
                 return {"success": False, "error": "Failed to generate label embeddings"}
             
-            # Get collection info to check size
-            collection_info = self.qdrant_service.get_collection_info(collection_name)
-            total_points = collection_info['vector_count']
+            # Validate label embedding dimensions match collection
+            if label_embeddings and len(label_embeddings) > 0:
+                label_dim = len(label_embeddings[0])
+                if expected_dim and label_dim != expected_dim:
+                    return {"success": False, "error": f"Label embedding dimension mismatch: collection vectors are {expected_dim}D but label embeddings are {label_dim}D. Ensure labels are generated with the same model as the collection."}
             
             # Process all vectors with pagination to avoid backend caps
             self.log(f"Retrieving all {total_points} vectors for classification...")
@@ -171,19 +194,37 @@ class DocumentClassifier:
             if not points_list:
                 return {"success": False, "error": "No vectors found in collection"}
             
-            # Filter out metadata point (ID 0)
+            # Filter out metadata point (ID 0) and None vectors
             data_points = [p for p in points_list if not p.get('payload', {}).get('_metadata')]
+            data_points = [p for p in data_points if p.get('vector') is not None]  # Filter None vectors
             
             if not data_points:
-                return {"success": False, "error": "No data vectors found in collection"}
+                return {"success": False, "error": "No valid data vectors found in collection"}
             
             vectors = np.array([point['vector'] for point in data_points])
             point_ids = [point['id'] for point in data_points]
+            
+            # Validate vector dimensions match expected dimension
+            if len(vectors) > 0:
+                actual_dim = vectors.shape[1]
+                if expected_dim and actual_dim != expected_dim:
+                    return {"success": False, "error": f"Vector dimension mismatch: expected {expected_dim}D but got {actual_dim}D"}
+                
+                # Validate label embeddings dimension matches
+                if label_embeddings and len(label_embeddings) > 0:
+                    label_dim = len(label_embeddings[0])
+                    if actual_dim != label_dim:
+                        return {"success": False, "error": f"Vector dimension mismatch: collection vectors are {actual_dim}D but label embeddings are {label_dim}D"}
             
             # Calculate cosine similarity and classify
             self.log("Classifying documents...")
             similarities = cosine_similarity(vectors, label_embeddings)
             predicted_indices = np.argmax(similarities, axis=1)
+            
+            # Validate indices are within bounds (defensive check)
+            num_labels = len(label_names)
+            if num_labels == 0:
+                return {"success": False, "error": "No labels available for classification"}
             
             # Update payloads in batches (each point has its own payload)
             # Uses official batch_update_points API for speed
@@ -193,6 +234,11 @@ class DocumentClassifier:
             batched_payloads: List[dict] = []
             
             for i, (point_id, pred_idx) in enumerate(zip(point_ids, predicted_indices)):
+                # Validate index is within bounds
+                if pred_idx < 0 or pred_idx >= num_labels:
+                    self.log(f"Warning: Invalid prediction index {pred_idx} for point {point_id}, skipping", True)
+                    continue
+                
                 batched_ids.append(point_id)
                 batched_payloads.append({
                     "predicted_label": label_names[pred_idx],
@@ -320,14 +366,39 @@ class DocumentClassifier:
                 final_description = self._generate_label_description(label_name)
                 enriched_flag = True
             
-            # Generate embedding for the label
+            # Get collection info first to determine the correct embedding model
+            collection_info = self.qdrant_service.get_collection_info(collection_name)
+            if not collection_info:
+                return {"success": False, "error": "Failed to get collection info"}
+            
+            expected_dim = collection_info.get('dimension')
+            
+            # Determine embedding model from collection
+            collection_model = collection_info.get('embedding_model')
+            if not collection_model:
+                # Infer model from dimension
+                if expected_dim == 1536:
+                    collection_model = "text-embedding-3-small"
+                elif expected_dim == 3072:
+                    collection_model = "text-embedding-3-large"
+                elif expected_dim == 512 or expected_dim == 1024 or expected_dim == 768:
+                    collection_model = "text-embedding-ada-002"
+                else:
+                    collection_model = "text-embedding-3-small"  # fallback
+            
+            # Generate embedding for the label using collection's model
             label_text = label_name
             if final_description:
                 label_text += f": {final_description}"
             
-            embeddings = embed([label_text])
+            embeddings = embed([label_text], model=collection_model)
             if not embeddings:
                 return {"success": False, "error": "Failed to generate label embedding"}
+            
+            # Validate embedding dimension matches collection
+            actual_dim = len(embeddings[0]) if embeddings else 0
+            if expected_dim and actual_dim != expected_dim:
+                return {"success": False, "error": f"Embedding dimension mismatch: collection expects {expected_dim}D but got {actual_dim}D. Ensure the embedding model matches the collection's model."}
             
             # Reserve one ID for this label
             label_id = f"custom_{len(label_name)}_{HashUtils.generate_deterministic_seed(label_name, 1000)}"
@@ -458,6 +529,27 @@ Return only the description, no additional text.
         try:
             self.log("Storing labels in collection...")
             
+            # Get collection info to determine the correct embedding model
+            collection_info = self.qdrant_service.get_collection_info(collection_name)
+            if not collection_info:
+                self.log("Failed to get collection info.", True)
+                return
+            
+            expected_dim = collection_info.get('dimension')
+            
+            # Determine embedding model from collection
+            collection_model = collection_info.get('embedding_model')
+            if not collection_model:
+                # Infer model from dimension
+                if expected_dim == 1536:
+                    collection_model = "text-embedding-3-small"
+                elif expected_dim == 3072:
+                    collection_model = "text-embedding-3-large"
+                elif expected_dim == 512 or expected_dim == 1024 or expected_dim == 768:
+                    collection_model = "text-embedding-ada-002"
+                else:
+                    collection_model = "text-embedding-3-small"  # fallback
+            
             # Generate embeddings for labels
             label_texts = []
             label_metadata = []
@@ -477,12 +569,19 @@ Return only the description, no additional text.
                     "hash": HashUtils.create_label_hash(label_id, label_text)
                 })
             
-            # Generate embeddings
-            label_embeddings = embed(label_texts)
+            # Generate embeddings using collection's model
+            label_embeddings = embed(label_texts, model=collection_model)
             
             if not label_embeddings:
                 self.log("Failed to generate label embeddings.", True)
                 return
+            
+            # Validate dimensions match
+            if len(label_embeddings) > 0:
+                actual_dim = len(label_embeddings[0])
+                if expected_dim and actual_dim != expected_dim:
+                    self.log(f"Warning: Embedding dimension mismatch: collection expects {expected_dim}D but got {actual_dim}D", True)
+                    return
             
             # Reserve a contiguous ID block for all labels
             start_id = self._allocate_point_ids(collection_name, len(label_embeddings))

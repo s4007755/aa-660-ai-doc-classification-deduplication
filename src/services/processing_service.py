@@ -600,7 +600,7 @@ class ProcessingService:
                     
                     if ext == '.pdf':
                         try:
-                            from PyPDF2 import PdfReader
+                            from pypdf import PdfReader
                             reader = PdfReader(file_path)
                             text = "\n".join(page.extract_text() or "" for page in reader.pages)
                             return text.strip()

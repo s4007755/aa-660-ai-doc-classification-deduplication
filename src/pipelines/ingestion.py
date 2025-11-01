@@ -5,7 +5,7 @@ import hashlib
 from typing import Dict, Any, Optional, List
 
 import docx
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 # Language detection disabled for performance
 detect = None
 

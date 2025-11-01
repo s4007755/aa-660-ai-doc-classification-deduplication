@@ -472,7 +472,7 @@ class Cli:
                 label_table.add_column("Percentage", style="cyan", justify="right")
                 
                 for name, count in sorted(inferred.items(), key=lambda x: (-x[1], x[0])):
-                    percentage = (count / total_points) * 100
+                    percentage = (count / total_points * 100) if total_points > 0 else 0.0
                     label_table.add_row(
                         name,
                         f"{count:,}",
@@ -500,6 +500,9 @@ class Cli:
         try:
             # Get collection info
             collection_info = self.qdrant_service.get_collection_info(self.collection)
+            if not collection_info:
+                self.log("Failed to retrieve collection info.", True)
+                return
             total_points = collection_info['vector_count']
             
             if total_points == 0:
@@ -555,7 +558,7 @@ class Cli:
             
             # Sort by cluster ID
             for (cluster_id, cluster_name), count in sorted(cluster_counts.items()):
-                percentage = (count / total_points) * 100
+                percentage = (count / total_points * 100) if total_points > 0 else 0.0
                 cluster_table.add_row(
                     str(cluster_id),
                     cluster_name,
@@ -698,6 +701,9 @@ class Cli:
         try:
             # Get collection info using QdrantService
             collection_info = self.qdrant_service.get_collection_info(self.collection)
+            if not collection_info:
+                self.log("Failed to retrieve collection info.", True)
+                return
             
             # Collection overview
             self.console.print(f"\n[bold cyan]Collection Statistics:[/bold cyan] [yellow]{self.collection}[/yellow]")

@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import logging
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 # Add src to Python path
 sys.path.insert(0, '.')
@@ -49,10 +50,31 @@ MAX_SCROLL_LIMIT = 10000  # Maximum limit for scroll operations
 DEFAULT_PAGE_SIZE = 1000  # Default page size for pagination
 MAX_TEXT_PREVIEW = 500  # Maximum characters for text preview
 
+# Lazy initialization for Qdrant service (avoids connection during import)
+_qdrant_service = None
+
+def _get_qdrant_service():
+    """Get or create Qdrant service instance (lazy initialization)."""
+    global _qdrant_service
+    if _qdrant_service is None:
+        _qdrant_service = QdrantService()
+        logger.info("[green]✓[/green] Qdrant service initialized", extra={"markup": True})
+    return _qdrant_service
+
+# Lifespan event handler for startup and shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown."""
+    # Startup: Initialize Qdrant service eagerly (for production performance)
+    _get_qdrant_service()
+    yield
+    # Shutdown: Add any cleanup code here if needed in the future
+
 app = FastAPI(
     title="Document Clustering API",
     description="REST API for querying clustered documents in Qdrant",
     version="1.0.1",
+    lifespan=lifespan,
     # docs_url="/docs",      # Default: Swagger UI at /docs
     # redoc_url="/redoc",    # Default: ReDoc at /redoc
     # openapi_url="/openapi.json"  # Default: OpenAPI schema
@@ -96,9 +118,13 @@ async def log_requests(request: Request, call_next):
     
     return response
 
-# Initialize Qdrant service with optimized settings
-qdrant_service = QdrantService()
-logger.info("[green]✓[/green] Qdrant service initialized", extra={"markup": True})
+# Module-level accessor that initializes on first use
+class _QdrantServiceProxy:
+    """Proxy that delays QdrantService initialization until first access."""
+    def __getattr__(self, name):
+        return getattr(_get_qdrant_service(), name)
+
+qdrant_service = _QdrantServiceProxy()
 
 # Performance optimizations
 COLLECTIONS_CACHE = {}
@@ -197,7 +223,15 @@ async def list_collections():
         # Enhance collections with model and metadata information
         enhanced_collections = {}
         for name, info in collections_dict.items():
-            embedding_model = infer_embedding_model(info['size'])
+            if not isinstance(info, dict):
+                continue  # Skip invalid entries
+            
+            # Safely get dimension/size
+            dimension = info.get('size') or info.get('dimension')
+            if not dimension:
+                continue  # Skip if no dimension info
+            
+            embedding_model = infer_embedding_model(dimension)
             
             # Get additional metadata
             metadata = qdrant_service.get_collection_metadata(name)

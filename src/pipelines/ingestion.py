@@ -1,57 +1,93 @@
-# src/pipelines/ingestion.py
+from __future__ import annotations
+
 import os
-import re
 import hashlib
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 import docx
-from pypdf import PdfReader
-# Language detection disabled for performance
-detect = None
+from PyPDF2 import PdfReader
+try:
+    from langdetect import detect
+except Exception:
+    detect = None
 
-# Extract tokens from filename (inline to avoid dependency on text_preproc)
-def _filename_tokens(filename: str) -> List[str]:
-    """Extract meaningful tokens from filename for metadata."""
-    if not filename:
-        return []
-    # Get basename (handle both Unix and Windows paths)
-    name = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-    # Drop file extension
-    name = re.sub(r"\.[A-Za-z0-9]{1,6}$", "", name)
-    # Replace non-word characters with spaces, normalize, lowercase
-    name = re.sub(r"[^\w]+", " ", name).strip().lower()
-    # Extract tokens: at least 2 chars, not all digits
-    toks = [t for t in name.split() if t and not t.isdigit() and len(t) >= 2]
-    return toks[:20]  # Limit to 20 tokens
+from src.features.text_preproc import (
+    filename_tokens,
+    drop_repeating_lines,
+)
 
-# compute SHA256 of the file contents
+# File text extraction & lightweight metadata
+#
+# Responsibilities:
+# - Extract visible text from PDF/DOCX/TXT with pragmatic fallbacks.
+# - Surface a small, stable metadata subset usable for indexing.
+# - Compute a raw-file SHA256.
+# - Defer any semantic normalization and content hashing to downstream stages.
+
+
+# Byte-level identity
 def compute_file_hash(file_path: str) -> str:
+    """
+    Compute a SHA256 over raw file bytes.
+    """
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
-        while chunk := f.read(8192):
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
             hasher.update(chunk)
     return hasher.hexdigest()
 
-# extract visible text from PDF
+
+# PDF (.pdf)
 def extract_text_pdf(file_path: str) -> str:
-    text = []
-    reader = PdfReader(file_path)
-    for page in reader.pages:
-        text.append(page.extract_text() or "")
-    return "\n".join(text)
+    """
+    Extract visible text from a PDF, page-by-page.
+    """
+    try:
+        reader = PdfReader(file_path)
+    except Exception:
+        # Unreadable/encrypted or invalid PDFs = empty text
+        return ""
 
-# extract visible text from DOCX
+    chunks: list[str] = []
+    for page in getattr(reader, "pages", []):
+        try:
+            pg = page.extract_text() or ""
+        except Exception:
+            pg = ""
+        # Normalize line breaks up front for downstream stability
+        pg = pg.replace("\r\n", "\n").replace("\r", "\n")
+        chunks.append(pg)
+    return "\n".join(chunks)
+
+
+# WordprocessingML (.docx)
 def extract_text_docx(file_path: str) -> str:
+    """
+    Extract visible paragraph text from a DOCX.
+    """
     doc = docx.Document(file_path)
-    return "\n".join(para.text for para in doc.paragraphs)
+    # Preserve paragraph boundaries.
+    paras = [para.text for para in doc.paragraphs]
+    return "\n".join(paras)
 
-# extract visible text from TXT
+
+# Plain text (.txt)
 def extract_text_txt(file_path: str) -> str:
+    """
+    Read UTF-8 text.
+    """
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
 
-# internal: try to detect language safely
+
+# Optional language detection
 def _safe_detect_language(text: str) -> Optional[str]:
+    """
+    Attempt to detect language, returns None if unavailable/undecidable.
+    """
     try:
         if detect is None or not text or not text.strip():
             return None
@@ -59,25 +95,36 @@ def _safe_detect_language(text: str) -> Optional[str]:
     except Exception:
         return None
 
-# internal: pull lightweight metadata if present
+
+# Metadata helpers
 def _pdf_core_meta(file_path: str) -> Dict[str, Any]:
+    """
+    Extract a minimal set of PDF document metadata.
+    """
     meta: Dict[str, Any] = {}
     try:
         reader = PdfReader(file_path)
         info = getattr(reader, "metadata", None) or {}
+        # Metadata keys can be prefixed, normalize comparisons.
         def _get(key: str) -> Optional[str]:
             for k, v in info.items():
                 if isinstance(k, str) and k.strip("/").lower() == key:
                     return str(v)
             return None
+
         meta["title"] = _get("title")
         meta["author"] = _get("author")
         meta["created"] = _get("creationdate") or _get("created")
     except Exception:
+        # Metadata not essential
         pass
     return meta
 
+
 def _docx_core_meta(file_path: str) -> Dict[str, Any]:
+    """
+    Extract a minimal set of DOCX core properties.
+    """
     meta: Dict[str, Any] = {}
     try:
         doc = docx.Document(file_path)
@@ -89,30 +136,47 @@ def _docx_core_meta(file_path: str) -> Dict[str, Any]:
         pass
     return meta
 
-# main: extract text and metadata
+
+# Main entry point
 def extract_document(file_path: str) -> Dict[str, Any]:
+    """
+    Extract visible text and lightweight metadata from a file.
+
+    Strategy
+    - Dispatch by extension (.pdf/.docx/.txt), other formats raise ValueError.
+    - For PDFs, apply `drop_repeating_lines` to reduce header/footer noise.
+    - Compute a raw-file SHA256 and basic file level attributes.
+    - Defer normalized content hashing to a downstream stage
+    """
     ext = os.path.splitext(file_path)[1].lower()
+
     if ext == ".pdf":
         raw_text = extract_text_pdf(file_path)
+        # PDFs often include per-page headers/footers.
+        raw_text = drop_repeating_lines(raw_text, min_count=3, max_len=120)
         core_meta = _pdf_core_meta(file_path)
         mime = "application/pdf"
+
     elif ext == ".docx":
         raw_text = extract_text_docx(file_path)
         core_meta = _docx_core_meta(file_path)
         mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
     elif ext == ".txt":
         raw_text = extract_text_txt(file_path)
         core_meta = {}
         mime = "text/plain"
+
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
+    # Best-effort language hint.
     lang = _safe_detect_language(raw_text)
-    fname = os.path.basename(file_path)
 
+    fname = os.path.basename(file_path)
     metadata: Dict[str, Any] = {
         "filename": fname,
-        "filename_tokens": _filename_tokens(fname),
+        "filename_tokens": filename_tokens(fname),
         "filepath": file_path,
         "hash": compute_file_hash(file_path),
         "filesize": os.path.getsize(file_path),

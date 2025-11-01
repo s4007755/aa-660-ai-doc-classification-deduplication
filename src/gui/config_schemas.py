@@ -1,9 +1,18 @@
-# src/gui/config_schemas.py
+# src/config/profiles.py (example path — keep your original path/filename)
 from __future__ import annotations
+
+"""
+Profiles and serialization utilities
+
+This module centralizes:
+* Human-friendly pipeline profiles (Balanced / High Precision / Recall-Heavy / Custom)
+* Safe (de)serialization for nested dataclass configurations (dict/JSON/YAML)
+* Shallow override application with deep merge semantics
+* Basic validation/clipping to keep config values sane for the GUI/CLI
+"""
 
 from dataclasses import dataclass, asdict, replace, fields, is_dataclass
 from typing import Any, Dict, Optional, List
-
 import json
 
 try:
@@ -20,8 +29,13 @@ from src.pipelines.near_duplicate import (
     SelfLearningConfig,
 )
 
-# helpers: dataclass reconstruction
+
+# Dataclass (de)serialization helpers
+
 def _dc_from_dict(dc_type, data: Dict[str, Any]):
+    """
+    Recursively reconstruct a dataclass instance from a possibly nested dict.
+    """
     if not is_dataclass(dc_type):
         return data
     kwargs = {}
@@ -36,22 +50,38 @@ def _dc_from_dict(dc_type, data: Dict[str, Any]):
     return dc_type(**kwargs)
 
 def _deep_asdict(obj: Any) -> Any:
+    """
+    Convert dataclasses to plain Python containers.
+
+    Behaves like dataclasses.asdict but also processes nested lists/dicts
+    that may contain dataclasses deeper in the structure.
+    """
     if is_dataclass(obj):
         return {k: _deep_asdict(v) for k, v in asdict(obj).items()}
     if isinstance(obj, (list, tuple)):
-        return [ _deep_asdict(x) for x in obj ]
+        return [_deep_asdict(x) for x in obj]
     if isinstance(obj, dict):
         return {k: _deep_asdict(v) for k, v in obj.items()}
     return obj
 
-# profiles
+
+# Built-in Profiles
+
 PROFILE_BALANCED = "Balanced"
 PROFILE_HIGH_PREC = "High Precision"
 PROFILE_RECALL = "Recall-Heavy"
 PROFILE_CUSTOM = "Custom"
 
 def make_profile(name: str) -> PipelineConfig:
+    """
+    Return a baseline PipelineConfig matching the named profile.
+
+    Parameters
+    name : str
+        Case-insensitive profile name ('balanced', 'high-precision', 'recall-heavy').
+    """
     n = name.strip().lower()
+
     if n in ("balanced",):
         return PipelineConfig(
             simhash=LearnerConfig(enabled=True, target_precision=0.98),
@@ -63,6 +93,7 @@ def make_profile(name: str) -> PipelineConfig:
             self_learning=SelfLearningConfig(enabled=True, epochs=2),
             persist=True,
         )
+
     if n in ("high precision", "high-precision", "precision"):
         return PipelineConfig(
             simhash=LearnerConfig(enabled=True, target_precision=0.995, min_confidence=0.60),
@@ -74,6 +105,7 @@ def make_profile(name: str) -> PipelineConfig:
             self_learning=SelfLearningConfig(enabled=True, epochs=1),
             persist=True,
         )
+
     if n in ("recall-heavy", "recall", "high recall"):
         return PipelineConfig(
             simhash=LearnerConfig(enabled=True, target_precision=0.95),
@@ -85,64 +117,98 @@ def make_profile(name: str) -> PipelineConfig:
             self_learning=SelfLearningConfig(enabled=True, epochs=3),
             persist=True,
         )
+
+    # Default fallback
     return make_profile(PROFILE_BALANCED)
 
 def list_profiles() -> List[str]:
+    """Return the human-readable list of available profiles."""
     return [PROFILE_BALANCED, PROFILE_HIGH_PREC, PROFILE_RECALL, PROFILE_CUSTOM]
 
-# serialization
+
+# Serialization helpers
+
 def to_dict(cfg: PipelineConfig) -> Dict[str, Any]:
+    """Losslessly convert a PipelineConfig to a plain dict."""
     return _deep_asdict(cfg)
 
 def from_dict(d: Dict[str, Any]) -> PipelineConfig:
+    """Reconstruct a PipelineConfig from a plain dict produced by to_dict/JSON/YAML."""
     return _dc_from_dict(PipelineConfig, d)
 
 def to_json(cfg: PipelineConfig, *, indent: Optional[int] = 2) -> str:
+    """Serialize PipelineConfig to JSON string."""
     return json.dumps(to_dict(cfg), ensure_ascii=False, indent=indent)
 
 def from_json(s: str) -> PipelineConfig:
+    """Deserialize PipelineConfig from JSON string."""
     return from_dict(json.loads(s))
 
 def to_yaml(cfg: PipelineConfig) -> str:
+    """
+    Serialize PipelineConfig to YAML string.
+    """
     if yaml is None:
         raise RuntimeError("pyyaml not installed")
     return yaml.safe_dump(to_dict(cfg), sort_keys=False)
 
 def from_yaml(s: str) -> PipelineConfig:
+    """
+    Deserialize PipelineConfig from YAML string.
+    """
     if yaml is None:
         raise RuntimeError("pyyaml not installed")
     return from_dict(yaml.safe_load(s))
 
-# overrides
+
+# Overrides & validation
+
 def apply_overrides(cfg: PipelineConfig, overrides: Dict[str, Any]) -> PipelineConfig:
+    """
+    Apply shallow user overrides onto a PipelineConfig.
+    """
     base = to_dict(cfg)
     _deep_update(base, overrides)
     out = from_dict(base)
     return validate(out)
 
 def _deep_update(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+    """
+    In place deep dict merge: update `dst` with `src`.
+
+    - Dict values are merged recursively.
+    - Non-dict values are overwritten.
+    """
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _deep_update(dst[k], v)
         else:
             dst[k] = v
 
-# validation
 def validate(cfg: PipelineConfig) -> PipelineConfig:
+    """
+    Clamp and sanitize numeric fields to safe ranges for the pipeline.
+
+    This is intentionally conservative,
+    but it prevents pathological inputs from the GUI/CLI or external config.
+    """
     def _clip01(x: float) -> float:
         return max(0.0, min(1.0, float(x)))
+
     # learner configs
     for lc in (cfg.simhash, cfg.minhash, cfg.embedding):
         lc.target_precision = _clip01(lc.target_precision)
         if lc.min_confidence is not None:
             lc.min_confidence = _clip01(lc.min_confidence)
         lc.max_pairs_per_epoch = max(1, int(lc.max_pairs_per_epoch))
+
     # arbiter
     cfg.arbiter.require_agreement = max(1, int(cfg.arbiter.require_agreement))
     cfg.arbiter.gray_zone_margin = max(0.0, float(cfg.arbiter.gray_zone_margin))
     cfg.arbiter.max_escalation_steps = max(0, int(cfg.arbiter.max_escalation_steps))
     cfg.arbiter.max_self_train_epochs = max(0, int(cfg.arbiter.max_self_train_epochs))
     cfg.arbiter.strong_margin = max(0.0, float(cfg.arbiter.strong_margin))
+
     # candidates
     cfg.candidates.shingle_size = max(1, int(cfg.candidates.shingle_size))
     cfg.candidates.num_perm = max(8, int(cfg.candidates.num_perm))
@@ -150,18 +216,28 @@ def validate(cfg: PipelineConfig) -> PipelineConfig:
     cfg.candidates.max_candidates_per_doc = max(1, int(cfg.candidates.max_candidates_per_doc))
     if cfg.candidates.max_total_candidates is not None:
         cfg.candidates.max_total_candidates = max(1, int(cfg.candidates.max_total_candidates))
+
     # bootstrap
     cfg.bootstrap.max_pos_pairs = max(1, int(cfg.bootstrap.max_pos_pairs))
     cfg.bootstrap.max_neg_pairs = max(1, int(cfg.bootstrap.max_neg_pairs))
-    # self-learning
+
+    # self-training
     cfg.self_learning.epochs = max(0, int(cfg.self_learning.epochs))
     return cfg
 
-# helpers for GUI
+
+# GUI helpers
+
 def profile_config(profile_name: str) -> PipelineConfig:
+    """
+    Convenience for the GUI: build and validate a profile in one call.
+    """
     return validate(make_profile(profile_name))
 
 def config_summary(cfg: PipelineConfig) -> Dict[str, Any]:
+    """
+    Return a compact, GUI friendly summary of the key knobs in a config.
+    """
     return {
         "profile_like": _guess_profile(cfg),
         "require_agreement": cfg.arbiter.require_agreement,
@@ -180,6 +256,11 @@ def config_summary(cfg: PipelineConfig) -> Dict[str, Any]:
     }
 
 def _guess_profile(cfg: PipelineConfig) -> str:
+    """
+    Classify a config as closest to one of the stock profiles.
+
+    This is not persisted anywhere, it is used for display only.
+    """
     tp = (cfg.simhash.target_precision, cfg.minhash.target_precision, cfg.embedding.target_precision)
     if all(x >= 0.994 for x in tp) and cfg.arbiter.gray_zone_margin <= 0.05:
         return PROFILE_HIGH_PREC

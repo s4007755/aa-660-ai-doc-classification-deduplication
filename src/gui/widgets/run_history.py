@@ -1,3 +1,4 @@
+# src/gui/widgets/run_history.py
 from __future__ import annotations
 
 import json
@@ -8,6 +9,27 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+"""
+RunHistory
+----------
+A master detail widget for browsing historical runs, viewing summary
+statistics, inspecting stored configuration/calibration snapshots and
+opening/exporting reports.
+
+Layout
+ • Left pane: table of runs (ID, started/ended timestamps, status, notes).
+ • Right pane: action buttons (open report / export JSON), a Summary
+   card with key metrics and a tabbed view to show the full config JSON
+   and per-learner calibration entries.
+
+Data expectations
+ • keys like: run_id, started_at, ended_at, status, notes
+ • metric fields: pairs_scored, exact_duplicates, near_duplicates,
+   duplicates_total, uncertain, consensus_rate, escalations_rate, clusters
+ • JSON blobs: config_json, calibrations
+ • Optional: report_path, epochs_run
+"""
 
 try:
     from src.persistence import state_store as _store
@@ -26,6 +48,7 @@ _OpenReport = Optional[Callable[[int], Optional[str]]]
 
 
 def _s(x: Any) -> str:
+    """Safely stringify values for table cells, returning an empty string for falsy/placeholder values."""
     if x is None:
         return ""
     t = str(x)
@@ -33,6 +56,7 @@ def _s(x: Any) -> str:
 
 
 def _pct_or_blank(x: Any) -> str:
+    """Render a float as a percentage with one decimal, otherwise return empty string."""
     try:
         return f"{float(x) * 100.0:.1f}%"
     except Exception:
@@ -40,6 +64,15 @@ def _pct_or_blank(x: Any) -> str:
 
 
 class RunHistory(ttk.Frame):
+    """
+    Master detail browser for pipeline runs.
+
+    Internals:
+      * _populate_runs(): fills the left Treeview
+      * _render_detail(): paints right pane from a detail dict
+      * _default_*(): state_store-backed fallbacks for loaders and open_report
+    """
+
     def __init__(
         self,
         master,
@@ -50,19 +83,24 @@ class RunHistory(ttk.Frame):
         text: str = "Run history",
     ):
         super().__init__(master, padding=8)
+        # Injected callbacks
         self._load_runs_cb = load_runs or self._default_load_runs
         self._load_details_cb = load_details or self._default_load_details
         self._open_report_cb = open_report or self._default_open_report
 
+        # Runtime caches
         self._runs: List[Dict[str, Any]] = []
         self._run_by_id: Dict[int, Dict[str, Any]] = {}
 
+        # Build UI and prime with data
         self._build_ui(text)
         self.refresh()
+
 
     # UI
 
     def _build_ui(self, text: str):
+        """Construct the full split-view interface and bind callbacks."""
         top = ttk.Frame(self)
         top.pack(fill=tk.X)
         ttk.Label(top, text=text, font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT)
@@ -72,7 +110,7 @@ class RunHistory(ttk.Frame):
         self.entry_filter.pack(side=tk.RIGHT, padx=(6, 0))
         ttk.Button(top, text="Filter", command=self._apply_filter).pack(side=tk.RIGHT)
 
-        # Split pane
+        # Split pane for runs list (left) and detail (right)
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
@@ -103,7 +141,7 @@ class RunHistory(ttk.Frame):
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # Right: details
+        # Right: details/actions/tabs
         right = ttk.Frame(main)
         main.add(right, weight=2)
 
@@ -113,13 +151,13 @@ class RunHistory(ttk.Frame):
         ttk.Button(ab, text="Export config JSON…", command=self._export_config).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(ab, text="Export calibrations JSON…", command=self._export_calibrations).pack(side=tk.LEFT, padx=(6, 0))
 
-        # Summary card
+        # Summary card: key metrics and meta
         self.card = ttk.LabelFrame(right, text="Summary")
         self.card.pack(fill=tk.X, pady=(8, 6))
         self._sum_labels: Dict[str, ttk.Label] = {}
         self._make_summary(self.card)
 
-        # Notebook for Config / Calibrations
+        # Notebook for Config/Calibrations
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill=tk.BOTH, expand=True)
 
@@ -155,6 +193,7 @@ class RunHistory(ttk.Frame):
         v2.pack(side=tk.LEFT, fill=tk.Y)
 
     def _make_summary(self, parent: ttk.LabelFrame):
+        """Create a compact two-column grid of summary fields."""
         fields = [
             ("run_id", "Run"),
             ("started_at", "Started"),
@@ -183,9 +222,11 @@ class RunHistory(ttk.Frame):
         for c in range(2):
             parent.grid_columnconfigure(c, weight=1)
 
+
     # Public API
 
     def refresh(self):
+        """Reload runs for the left table and repopulate in descending run_id order."""
         try:
             runs = self._load_runs_cb() or []
         except Exception as e:
@@ -195,8 +236,11 @@ class RunHistory(ttk.Frame):
         self._run_by_id = {int(r["run_id"]): r for r in self._runs if "run_id" in r}
         self._populate_runs(self._runs)
 
+
     # Internals
+
     def _populate_runs(self, rows: Iterable[Dict[str, Any]]):
+        """Fill the left hand Treeview with basic run info."""
         self.tree.delete(*self.tree.get_children())
         for r in rows:
             self.tree.insert(
@@ -212,6 +256,7 @@ class RunHistory(ttk.Frame):
             )
 
     def _apply_filter(self):
+        """Filter left table by a case insensitive substring over several columns."""
         q = (self.entry_filter.get() or "").strip().lower()
         if not q:
             self._populate_runs(self._runs)
@@ -226,6 +271,7 @@ class RunHistory(ttk.Frame):
         self._populate_runs(flt)
 
     def _on_select(self, _evt=None):
+        """Respond to selection changes by loading and rendering the selected run's details."""
         sel = self.tree.selection()
         if not sel:
             self._render_detail(None)
@@ -245,6 +291,7 @@ class RunHistory(ttk.Frame):
         self._render_detail(details)
 
     def _render_detail(self, d: Optional[Dict[str, Any]]):
+        """Populate the right pane from a detail dict."""
         # Clear summary labels
         for _, lbl in self._sum_labels.items():
             lbl.configure(text="")
@@ -291,7 +338,7 @@ class RunHistory(ttk.Frame):
         self.txt_cfg.insert("1.0", pretty)
         self.txt_cfg.configure(state="disabled")
 
-        # Calibrations list
+        # Calibrations list: each row may contain params_json and reliability list
         cals = d.get("calibrations") or []
         for row in cals:
             learner = row.get("learner_name") or row.get("learner") or ""
@@ -317,8 +364,11 @@ class RunHistory(ttk.Frame):
                 rbcnt = 0
             self.cal_tree.insert("", tk.END, values=(learner, method, threshold, rbcnt))
 
+
     # Actions
+
     def _open_report(self):
+        """Open the saved report if present; otherwise generate and open a fresh report."""
         run = self._selected_run_details()
         if not run:
             return
@@ -335,6 +385,7 @@ class RunHistory(ttk.Frame):
             self._open_path(path)
             return
 
+        # Fallback: best effort generate via report_builder
         try:
             from src.reporting.report_builder import generate_report as _gen
             path = _gen(rid, out_dir="reports", fmt="html")
@@ -352,8 +403,8 @@ class RunHistory(ttk.Frame):
             messagebox.showerror("Open report", f"Failed to generate/open report:\n{e}")
             return
 
-
     def _export_config(self):
+        """Export the run's config JSON to a user selected path."""
         run = self._selected_run_details()
         if not run:
             return
@@ -378,6 +429,7 @@ class RunHistory(ttk.Frame):
             messagebox.showerror("Export failed", str(e))
 
     def _export_calibrations(self):
+        """Export the run's calibration rows as a JSON array to a user selected path."""
         run = self._selected_run_details()
         if not run:
             return
@@ -397,9 +449,11 @@ class RunHistory(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Export failed", str(e))
 
+
     # Helpers
 
     def _selected_run_details(self) -> Optional[Dict[str, Any]]:
+        """Return the detail dict for the currently selected run."""
         sel = self.tree.selection()
         if not sel:
             return None
@@ -414,6 +468,7 @@ class RunHistory(ttk.Frame):
             return None
 
     def _open_path(self, path: str):
+        """Open a local file path using the OS default handler."""
         try:
             if sys.platform.startswith("darwin"):
                 os.system(f"open '{path}'")
@@ -424,13 +479,25 @@ class RunHistory(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Open report", str(e))
 
-    # Defaults (state_store)
+
+    # Defaults
+
     def _default_load_runs(self) -> List[Dict[str, Any]]:
+        """Default: list runs via state_store.list_runs()."""
         if _store is None or not hasattr(_store, "list_runs"):
             return []
         return _store.list_runs()
 
     def _default_load_details(self, run_id: int) -> Dict[str, Any]:
+        """
+        Default: merge best effort details from state_store plus derived metrics.
+
+        Steps:
+          1) Fetch basic run info, config JSON, calibrations.
+          2) Fetch decisions (traces) to derive counts (exact/near/uncertain).
+          3) Optionally compute a metrics snapshot for consensus/escalations/clusters.
+          4) Attach stored report path if available.
+        """
         d: Dict[str, Any] = {}
         if _store is None:
             return d
@@ -467,6 +534,7 @@ class RunHistory(ttk.Frame):
             except Exception:
                 pass
 
+        # Pull a bounded set of decision traces for derived metrics
         dec_rows = []
         if hasattr(_store, "get_decisions"):
             try:
@@ -481,7 +549,7 @@ class RunHistory(ttk.Frame):
             except Exception:
                 pass
 
-        # Counters (exact/near/uncertain) from stored traces
+        # Counters from stored traces
         pairs = len(traces_json)
         exact = 0
         near = 0
@@ -508,6 +576,7 @@ class RunHistory(ttk.Frame):
         run_snap = snap.get("run", {}) if isinstance(snap, dict) else {}
 
         def _set_num(key: str, val: Any):
+            """Set numeric field only if missing or not numeric in the target dict."""
             if isinstance(val, (int, float)):
                 cur = d.get(key)
                 if not isinstance(cur, (int, float)) or cur is None:
@@ -527,7 +596,7 @@ class RunHistory(ttk.Frame):
         esc_from_snap = run_snap.get("escalations_rate", run_snap.get("escalations_pct"))
         _set_num("escalations_rate", esc_from_snap)
 
-        # Clusters: use snapshot count
+        # Clusters: use snapshot count if not already supplied
         if not isinstance(d.get("clusters"), int):
             cl = snap.get("clusters") or []
             if isinstance(cl, list):
@@ -545,6 +614,11 @@ class RunHistory(ttk.Frame):
         return d
 
     def _default_open_report(self, run_id: int) -> Optional[str]:
+        """
+        Default open report strategy:
+          1) Return previously saved path if it exists.
+          2) Otherwise generate a fresh report via report_builder and persist the path.
+        """
         # 1) Stored path
         path = None
         if _store and hasattr(_store, "get_report_path"):
@@ -577,21 +651,30 @@ class RunHistory(ttk.Frame):
 
 # Helper: adapt traces for metrics_snapshot
 def _as_traces_for_snapshot(traces_json: List[Dict[str, Any]]):
+    """
+    Convert stored JSON traces into a lightweight namespace format that
+    `metrics_snapshot` expects.
+    """
     from types import SimpleNamespace
     out = []
     for obj in traces_json:
         ln = {}
         for k, v in (obj.get("learners") or {}).items():
+            # Safe parse of prob and raw_score
             try:
                 prob = float(v.get("prob", 0.0))
             except Exception:
                 prob = 0.0
+            try:
+                raw = float(v.get("raw_score", prob))
+            except Exception:
+                raw = prob
             thr = v.get("threshold", None)
             try:
                 thr = float(thr) if thr is not None else None
             except Exception:
                 thr = None
-            ln[k] = SimpleNamespace(prob=prob, threshold=thr)
+            ln[k] = SimpleNamespace(prob=prob, raw_score=raw, threshold=thr)
         out.append(
             SimpleNamespace(
                 pair_key=obj.get("pair_key"),

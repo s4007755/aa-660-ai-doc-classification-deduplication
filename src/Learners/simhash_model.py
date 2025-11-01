@@ -1,12 +1,20 @@
-# src/learners/simhash_model.py
 from __future__ import annotations
+
+"""
+SimHash-based near-duplicate learner.
+
+Overview
+* Tokenization -> (optional) word shingles / char n-grams -> SimHash.
+* Similarity ~= 1 - HammingDistance(bits)/bits.
+* Adaptive calibration (binning/Platt) to convert similarity to probability.
+"""
 
 import re
 import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
@@ -34,15 +42,21 @@ from src.training.calibration import (
     apply_binning_or_platt,
 )
 
+
 # Tokenization / SimHash utils
 
 _DEFAULT_SW: set[str] = set()
 
 def _hamming(a: int, b: int, bits: int) -> int:
+    """Hamming distance between two bitstrings."""
     mask = (1 << bits) - 1
     return int(((a ^ b) & mask).bit_count())
 
 def _tokenize(s: str, min_len: int, stopwords: set[str], strict: bool, strip_ids: bool) -> List[str]:
+    """
+    Simple whitespace tokenizer with optional punctuation stripping and
+    removal of long numeric IDs or YYYY-MM-DD dates.
+    """
     if not s:
         return []
     s = s.lower()
@@ -61,12 +75,14 @@ def _tokenize(s: str, min_len: int, stopwords: set[str], strict: bool, strip_ids
     return out
 
 def _word_shingles(tokens: List[str], k: int) -> List[str]:
+    """k-gram word shingles, uses a visible separator to preserve boundaries."""
     if k <= 1:
         return tokens
     joiner = "\u241F"  # Symbol for unit separator
     return [joiner.join(tokens[i : i + k]) for i in range(0, len(tokens) - k + 1)]
 
 def _char_ngrams(s: str, n: int, strict: bool) -> List[str]:
+    """Overlapping character n-grams with optional punctuation stripping."""
     s = s.lower()
     if strict:
         s = re.sub(r"[^\w\s]", " ", s)
@@ -77,40 +93,44 @@ def _char_ngrams(s: str, n: int, strict: bool) -> List[str]:
     return [s[i : i + n] for i in range(0, len(s) - n + 1)]
 
 def _simhash_from_tokens(tokens: List[str], max_weight: int, bits: int) -> int:
+    """
+    Compute SimHash from tokens with capped token weights.
+    Uses simhash.Simhash if available, otherwise falls back to a deterministic
+    manual implementation using blake2b for stable hashing.
+    """
     if not tokens:
         return 0
     if Simhash is not None:
         counts = Counter(tokens)
         feats = [(t, min(c, max_weight)) for t, c in counts.items()]
         return int(Simhash(feats, f=bits).value)
-    """v = [0] * bits
+
+    # Fallback: manual simhash
+    v = np.zeros(bits, dtype=np.int64)
     mask = (1 << bits) - 1
-    for t in tokens:
-        h = hash(t) & mask
+    import hashlib  # stable per-token hash
+    for t, c in Counter(tokens).items():
+        h = int(hashlib.blake2b(t.encode("utf-8"), digest_size=16).hexdigest(), 16) & mask
+        w = min(int(c), max_weight)
         for i in range(bits):
-            v[i] += 1 if ((h >> i) & 1) else -1
+            v[i] += w if ((h >> i) & 1) else -w
     x = 0
     for i in range(bits):
         if v[i] >= 0:
             x |= (1 << i)
-    """
-    v = np.zeros(bits, dtype=int)
-    hashes = np.array([hash(t) & ((1 << bits) - 1) for t in tokens], dtype=np.uint64)
-    for i in range(bits):
-        v[i] = np.sum((hashes >> i) & 1) * 2 - len(tokens)  # +1/-1 logic
-    x = np.packbits(v >= 0)[0]  # simplified conversion back to int (needs care for >64 bits)
+    return x
 
-        
-    return int(x)
 
 # Internal state
 
 @dataclass
 class _State:
+    """Transient calibration artifacts stored outside LearnerState."""
     edges: Optional[np.ndarray] = None
     probs: Optional[np.ndarray] = None
     platt_a: Optional[float] = None
     platt_b: Optional[float] = None
+
 
 # Learner
 
@@ -120,24 +140,35 @@ class SimHashLearner(ILearner):
         return "simhash"
 
     def __init__(self, config: Optional[LearnerConfig] = None):
+        """
+        Construct SimHash learner with default state.
+        Stopwords can be extended via config.extras["stopwords"].
+        """
         self._config: LearnerConfig = config or LearnerConfig()
         self._state: LearnerState = make_fresh_state("simhash init")
         self._istate = _State()
         self._stopwords = set(_DEFAULT_SW)
 
-    # config/state
+
+    # Config/state
 
     @property
     def config(self) -> LearnerConfig:
         return self._config
 
     def configure(self, config: LearnerConfig) -> None:
+        """Update config, refresh stopwords and threshold from extras."""
         self._config = config
         extras = config.extras or {}
         sw_extra = set(map(str.lower, extras.get("stopwords", [])))
         self._stopwords = set(_DEFAULT_SW) | sw_extra
+        self._ensure_threshold_from_config()
 
     def load_state(self, state: Optional[LearnerState]) -> None:
+        """
+        Load persisted calibration/bins/Platt parameters, also apply any
+        threshold override from current config extras.
+        """
         self._state = state or make_fresh_state("simhash fresh")
         lp = self._state.learned_params or {}
         edges = np.array(lp.get("bin_edges", []), dtype=np.float32)
@@ -146,6 +177,7 @@ class SimHashLearner(ILearner):
         self._istate.probs = probs if probs.size else None
         self._istate.platt_a = lp.get("platt_a")
         self._istate.platt_b = lp.get("platt_b")
+        self._ensure_threshold_from_config()
 
         # Restore stopwords if persisted
         sw = lp.get("stopwords")
@@ -156,11 +188,21 @@ class SimHashLearner(ILearner):
         return self._state
 
     def prepare(self, corpus_stats: Optional[CorpusStats] = None) -> None:
+        """No heavy model to load, ensure threshold reflects config extras."""
+        self._ensure_threshold_from_config()
         pass
 
-    # hashing
+
+    # Hashing
 
     def _hash(self, dv: DocumentView) -> int:
+        """
+        Tokenize and featureize according to mode, then produce a SimHash.
+        Modes:
+          - "unigram": raw token unigrams (default)
+          - "wshingle": word shingles of size k
+          - "cngram": character n-grams
+        """
         extras = self._config.extras or {}
         strict = bool(extras.get("normalize_strict", False))
         strip_ids = bool(extras.get("strip_dates_ids", False))
@@ -191,9 +233,16 @@ class SimHashLearner(ILearner):
         # default: unigram tokens
         return _simhash_from_tokens(base_tokens, max_w, bits)
 
-    # scoring
+
+    # Scoring
 
     def score_pair(self, a: DocumentView, b: DocumentView) -> LearnerOutput:
+        """
+        Score a single pair:
+        1) SimHash each side, compute similarity from Hamming distance.
+        2) Calibrate similarity to probability via learned bins/Platt.
+        3) Provide brief rationale.
+        """
         extras = self._config.extras or {}
         bits = int(extras.get("hash_bits", 128))
 
@@ -232,8 +281,6 @@ class SimHashLearner(ILearner):
             internals=None,
         )
 
-    # inside SimHashLearner class
-
     def _score_one(
         self,
         a: DocumentView,
@@ -247,11 +294,14 @@ class SimHashLearner(ILearner):
         h2 = self._hash(b)
         hd = _hamming(h1, h2, bits)
         sim = max(0.0, 1.0 - hd / float(bits))
-        prob = apply_binning_or_platt(sim, self._state.calibration, edges, probs)
-        th = self._state.calibration.threshold
+        cal = self._state.calibration or CalibrationParams(
+            method="none", params={}, threshold=None, brier_score=None, reliability_bins=[]
+        )
+        prob = apply_binning_or_platt(sim, cal, self._istate.edges, self._istate.probs)
+        th = cal.threshold
 
         extras = self._config.extras or {}
-        # Show top overlapping tokens
+        # Top overlapping tokens for quick interpretability
         ov = list((Counter(_tokenize(a.text or "", 2, self._stopwords, False, False)) &
                 Counter(_tokenize(b.text or "", 2, self._stopwords, False, False))).elements())
         top_shared = [t for t, _ in Counter(ov).most_common(5)]
@@ -274,13 +324,15 @@ class SimHashLearner(ILearner):
             internals=None,
         )
 
-
     def batch_score(
         self,
         pairs: Iterable[Pair],
         use_parallel: bool = True,
         max_workers: int = os.cpu_count() or 4
     ) -> List[LearnerOutput]:
+        """
+        Score multiple pairs with optional parallelization.
+        """
         pairs_list = list(pairs)
         if not pairs_list:
             return []
@@ -293,9 +345,9 @@ class SimHashLearner(ILearner):
         if not use_parallel or len(pairs_list) < 4:
             return [self._score_one(a, b, edges, probs, bits) for a, b in pairs_list]
 
-        # Parallel execution (CPU-bound => ProcessPoolExecutor)
+        # Parallel execution
         outs: List[LearnerOutput] = []
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self._score_one, a, b, edges, probs, bits): (a, b)
                 for a, b in pairs_list
@@ -309,9 +361,18 @@ class SimHashLearner(ILearner):
 
         return outs
 
-    # training
+
+    # Training
 
     def fit_calibration(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> LearnerState:
+        """
+        Fit adaptive calibration and select an operating threshold.
+
+        Steps
+        1) Compute raw SimHash similarity for labeled positives/negatives.
+        2) Calibrate similarity -> probability (bins/Platt) against labels.
+        3) Persist learned artifacts and tokenization settings.
+        """
         pos_pairs = list(positives); neg_pairs = list(negatives)
         if not pos_pairs and not neg_pairs:
             return self._state
@@ -336,7 +397,7 @@ class SimHashLearner(ILearner):
             n_bins=int(extras.get("n_bins", 20)),
         )
 
-        # Store calibration + params + tokenization knobs for reproducibility
+        # Store calibration, params and tokenization knobs for reproducibility
         self._state.calibration = cal
         self._istate.edges = edges if edges.size else None
         self._istate.probs = probs if probs.size else None
@@ -359,6 +420,54 @@ class SimHashLearner(ILearner):
         }
         return self._state
 
-
     def self_train(self, pseudo_labels: Iterable[PairLabel]) -> LearnerState:
+        """Placeholder"""
         return self._state
+    
+    def _ensure_threshold_from_config(self) -> None:
+        """
+        Sync a threshold override from config extras into the active calibration.
+
+        Priority (first non-None wins):
+          decision_threshold -> threshold -> cosine_threshold (legacy) -> config.threshold
+
+        Behaviour
+        - If `force_threshold` is True, set method='none' and adopt the provided
+          threshold unconditionally.
+        - Otherwise, override only default-looking calibrations (method='none'
+          and threshold element of {None, 0.5, 0.75} and no learned_params) or when the
+          current threshold is None.
+        """
+        ex = self._config.extras or {}
+        # Primary: decision_threshold (simhash)
+        thr = (
+            ex.get("decision_threshold")    # primary for simhash
+            or ex.get("threshold")
+            or ex.get("cosine_threshold")
+            or getattr(self._config, "threshold", None)
+        )
+        if thr is None:
+            return
+
+        force = bool(ex.get("force_threshold", False))
+
+        cal = self._state.calibration
+        if cal is None:
+            self._state.calibration = CalibrationParams(
+                method="none", params={}, threshold=float(thr),
+                brier_score=None, reliability_bins=[]
+            )
+            return
+
+        if force:
+            cal.method = "none"
+            cal.threshold = float(thr)
+            return
+
+        looks_default = (
+            (cal.method == "none")
+            and (cal.threshold in (None, 0.5, 0.75))
+            and not self._state.learned_params
+        )
+        if looks_default or cal.threshold is None:
+            cal.threshold = float(thr)

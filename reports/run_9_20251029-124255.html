@@ -1,0 +1,342 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Run 9 Report</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; color: #1f2937; }
+      h1 { font-size: 24px; margin: 0 0 12px 0; }
+      h2 { font-size: 18px; margin-top: 24px; }
+      h3 { font-size: 15px; margin-top: 16px; }
+      code, pre { background: #f9fafb; padding: 8px; border-radius: 6px; display: block; overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+      th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; font-size: 13px; vertical-align: top; }
+      th { background: #f3f4f6; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 9999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+      .muted { color:#6b7280; }
+      img.chart { width: 100%; height: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+    </style>
+    </head>
+<body>
+<h1>Duplicate Detection Report — Run 9</h1>
+<p><span class='pill'>Started</span> 2025-10-29 12:33:56 &nbsp;&nbsp; <span class='pill'>Ended</span>  &nbsp;&nbsp; <span class="pill">Notes</span> Balanced</p>
+
+<h2>Run summary</h2>
+<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody><tr><td>Total pairs</td><td>0</td></tr><tr><td>Exact duplicates</td><td>0</td></tr><tr><td>Near duplicates</td><td>0</td></tr><tr><td>Duplicates (total)</td><td>0</td></tr><tr><td>Uncertain</td><td>0</td></tr><tr><td>Consensus rate</td><td>0.0%</td></tr><tr><td>Escalations</td><td>0.0%</td></tr></tbody></table>
+
+<h2>Per-learner metrics</h2>
+<p class='muted'>No per-learner metrics.</p>
+
+<h2>Calibration snapshot</h2>
+<table><thead><tr><th>Learner</th><th>Method</th><th>Threshold</th><th>Brier</th><th>Reliability (center:obs(count))</th></tr></thead><tbody></tbody></table>
+
+<h2>Charts</h2>
+<p class='muted'>Charts unavailable.</p>
+
+<h2>Examples</h2>
+<h3>Easy positives</h3>
+<p><i>None</i></p>
+<h3>Hard but resolved (escalated)</h3>
+<p><i>None</i></p>
+<h3>Uncertain</h3>
+<p><i>None</i></p>
+
+<h2>Decision traces</h2>
+<p class='muted'>No traces stored.</p>
+
+<h2>Clusters (from DUPLICATE traces)</h2>
+<p><i>No clusters found</i></p>
+
+<h2>Config</h2>
+<pre><code>{
+  "pipeline": {
+    "arbiter": {
+      "require_agreement": 2,
+      "gray_zone_margin": 0.05,
+      "max_escalation_steps": 3,
+      "escalation_order": [
+        "normalize_strict",
+        "minhash_alt_shingle",
+        "embed_whiten"
+      ],
+      "max_self_train_epochs": 2,
+      "strong_margin": 0.07,
+      "random_state": 13,
+      "near_support_band_mult": 2.0,
+      "near_support_min_band": 0.02,
+      "enable_exact_check": true,
+      "exact_normalization": "unicode_lines"
+    },
+    "candidates": {
+      "use_lsh": true,
+      "shingle_size": 3,
+      "num_perm": 64,
+      "lsh_threshold": 0.6,
+      "max_candidates_per_doc": 2000,
+      "max_total_candidates": null
+    },
+    "bootstrap": {
+      "max_pos_pairs": 50000,
+      "max_neg_pairs": 50000
+    },
+    "self_learning": {
+      "enabled": true,
+      "epochs": 2
+    },
+    "persist": true,
+    "disable_calibration": true
+  },
+  "learners": {
+    "simhash": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": 5,
+        "extra_2": 255,
+        "extra_3": 2,
+        "extra_4": false,
+        "extra_5": false
+      }
+    },
+    "minhash": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": 3,
+        "extra_2": 64,
+        "extra_3": 0.6,
+        "extra_4": false
+      }
+    },
+    "embedding": {
+      "enabled": true,
+      "target_precision": 0.98,
+      "min_confidence": null,
+      "max_pairs_per_epoch": 50000,
+      "random_state": 13,
+      "extras": {
+        "extra_1": "sentence-transformers/all-MiniLM-L6-v2",
+        "extra_2": 64,
+        "extra_3": 0.985,
+        "extra_4": false,
+        "extra_5": false,
+        "extra_6": false
+      }
+    }
+  },
+  "corpus_stats": {
+    "doc_count": 36,
+    "avg_doc_len": 45398.916666666664,
+    "lang_counts": {},
+    "extras": {
+      "top_tokens": [
+        [
+          "not",
+          7014
+        ],
+        [
+          "we",
+          6004
+        ],
+        [
+          "he",
+          5715
+        ],
+        [
+          "can",
+          5342
+        ],
+        [
+          "have",
+          5311
+        ],
+        [
+          "his",
+          4818
+        ],
+        [
+          "which",
+          4351
+        ],
+        [
+          "all",
+          4303
+        ],
+        [
+          "if",
+          4296
+        ],
+        [
+          "had",
+          4245
+        ],
+        [
+          "but",
+          4146
+        ],
+        [
+          "when",
+          3797
+        ],
+        [
+          "●●",
+          3770
+        ],
+        [
+          "will",
+          3713
+        ],
+        [
+          "they",
+          3549
+        ],
+        [
+          "one",
+          3401
+        ],
+        [
+          "there",
+          3133
+        ],
+        [
+          "more",
+          2829
+        ],
+        [
+          "data",
+          2757
+        ],
+        [
+          "her",
+          2671
+        ],
+        [
+          "their",
+          2637
+        ],
+        [
+          "my",
+          2633
+        ],
+        [
+          "has",
+          2619
+        ],
+        [
+          "what",
+          2496
+        ],
+        [
+          "than",
+          2448
+        ],
+        [
+          "would",
+          2411
+        ],
+        [
+          "she",
+          2326
+        ],
+        [
+          "may",
+          2321
+        ],
+        [
+          "use",
+          2268
+        ],
+        [
+          "no",
+          2264
+        ],
+        [
+          "so",
+          2263
+        ],
+        [
+          "other",
+          2239
+        ],
+        [
+          "sql",
+          2235
+        ],
+        [
+          "●●●",
+          2188
+        ],
+        [
+          "two",
+          2177
+        ],
+        [
+          "between",
+          2064
+        ],
+        [
+          "should",
+          2024
+        ],
+        [
+          "who",
+          2004
+        ],
+        [
+          "v2x",
+          2001
+        ],
+        [
+          "into",
+          1997
+        ],
+        [
+          "where",
+          1979
+        ],
+        [
+          "then",
+          1914
+        ],
+        [
+          "figure",
+          1899
+        ],
+        [
+          "our",
+          1894
+        ],
+        [
+          "each",
+          1853
+        ],
+        [
+          "over",
+          1836
+        ],
+        [
+          "such",
+          1835
+        ],
+        [
+          "using",
+          1834
+        ],
+        [
+          "number",
+          1830
+        ],
+        [
+          "company",
+          1812
+        ]
+      ],
+      "vocab_size": 116130
+    }
+  }
+}</code></pre>
+</body></html>

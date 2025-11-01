@@ -85,85 +85,107 @@ Workflow inside the app:
 ## Quickstart - CLI (headless)
 
 > Short, practical commands for running the pipeline without the GUI.  
-
-> If you installed with `pip install -e .[dev]`, a console script `aa660` may be available. Otherwise, use the module form `python -m src.cli_nd` if your environment exposes it.
+>
+> If you installed with `pip install -e .[dev]`, a console script **`dupfinder`** is available. Otherwise, use the module form `python -m src.cli_nd`.
 
 **Run the pipeline on a folder and emit a report**
 ```bash
-aa660 run --input ./docs --profile balanced --db ./aa660.db --reports ./reports
+dupfinder run --docs ./docs --preset balanced --perf-preset auto --report-dir ./reports
 # Fallback form (if console script not available):
-python -m src.cli_nd run --input ./docs --profile balanced --db ./aa660.db --reports ./reports
+python -m src.cli_nd run --docs ./docs --preset balanced --perf-preset auto --report-dir ./reports
 ```
 
 **Generate a fresh HTML report for a past run**
 ```bash
-aa660 report --run-id 42 --reports ./reports
+dupfinder report 42 --out-dir ./reports
 # Fallback:
-python -m src.cli_nd report --run-id 42 --reports ./reports
+python -m src.cli_nd report 42 --out-dir ./reports
 ```
 
-**List run history**
+**List documents in the DB**
 ```bash
-aa660 history --limit 20
+dupfinder list --max 50
 # Fallback:
-python -m src.cli_nd history --limit 20
+python -m src.cli_nd list --max 50
 ```
 
 **Notes**
-- `--profile` accepts: `balanced`, `high-precision`, `recall-heavy`.
-- `--db` points to (or creates) the SQLite DB file.
-- Reports are written as `reports/run_<RUN_ID>_<TIMESTAMP>.html`.
+- `--preset` accepts: `balanced`, `high`, `recall`.
+- Reports are written under `reports/run_<RUN_ID>_<TIMESTAMP>.html`.
 - The CLI mirrors the GUI’s defaults; flags are optional in simple cases.
 
+## CLI quick reference
 
-### Ingesting documents from an HTTP API (CLI)
+Run `dupfinder --help` or `dupfinder <cmd> --help` for full details.
 
-You can run the pipeline on docs fetched from a REST endpoint, no files required.
+### Commands
 
-**Basic usage**
+| Command | What it does |
+|---|---|
+| `run` | Run the pipeline on provided sources (folder / JSON / API) or the existing DB via `--use-db`. Writes an HTML report. |
+| `run-db` | Run the pipeline using documents already in the SQLite DB. |
+| `run-folder <FOLDER>` | Convenience: run the pipeline directly on a folder of `.pdf/.docx/.txt`. |
+| `ingest <FOLDER>` | Add a folder of files into the DB (no pipeline run). |
+| `list` | List documents currently in the DB (first N rows). |
+| `wipe` | Delete **all** documents from the DB (dangerous). |
+| `report <RUN_ID>` | Re-generate an HTML report for a previous run. |
+| `import-csv <PATH>` | Import up to N rows from a CSV with a `text` column into the DB. |
+
+### Common examples
+
+**Run on a folder (balanced, calibration off by default)**
 ```bash
-# Balanced preset, fetch JSON from an API, write report to ./reports
-python -m src.cli_nd --preset balanced   --api-url "https://api.example.com/my-docs"   --api-headers "{\"Authorization\":\"Bearer YOUR_TOKEN\"}"   --report-dir ./reports
+dupfinder run-folder ./docs --preset balanced --report-dir ./reports
 ```
 
-**Accepted response shapes**
-
-Your endpoint must return either:
-
-- A JSON **list** of items, or  
-- A JSON **object** with an `items` list.
-
-Each item may use any of these equivalent keys:
-```json
-[
-  { "doc_id": "A123", "text": "Document text here..." },
-  { "id": "A124",    "text": "Another doc..." },
-  { "doc_id": "A125","raw_text": "Raw content..." }
-]
-```
-
-**Header auth example**
+**Run pulling docs from the DB**
 ```bash
---api-headers "{\"Authorization\":\"Bearer sk_live_...\",\"X-Tenant\":\"acme\"}"
+dupfinder run-db --preset high --calibration --report-dir ./reports
 ```
-> The value must be **valid JSON** (double-quoted keys/values). If it isn’t valid, the CLI logs a warning and ignores it.
 
-**Troubleshooting / notes**
-- Provide **at least 2 items**; otherwise the run will exit early.
-- For offline runs with a saved payload, you can also point to a file:
-  ```bash
-  python -m src.cli_nd --preset balanced --json-file ./my_docs.json --report-dir ./reports
-  ```
-- Reports are written to `--report-dir` as `run_<RUN_ID>_<TIMESTAMP>.html`.
+**Run with in-memory sources**
+```bash
+# From a folder (without persisting to DB)
+dupfinder run --docs ./docs --preset recall --report-dir ./reports
 
+# From a JSON file (list or {items:[...]}) 
+dupfinder run --json-file ./my_docs.json --preset balanced --report-dir ./reports
 
-## Profiles
+# From an HTTP API
+dupfinder run --api-url "https://api.example.com/my-docs" --api-headers '{"Authorization":"Bearer TOKEN"}' --preset balanced --report-dir ./reports
+```
 
-- **Balanced** – Good overall trade‑off.  
-- **High Precision** – Stricter thresholds, fewer false positives.  
-- **Recall‑Heavy** – More aggressive duplicate finding (expect more uncertain/escalations).
+**Generate a fresh report for a past run**
+```bash
+dupfinder report 42 --out-dir ./reports
+```
 
-> You can tune the gray‑zone margin, escalation steps and self‑train epochs in the *Main* tab before running.
+**DB utilities**
+```bash
+dupfinder ingest ./docs # add files into DB (no run)
+dupfinder list --max 50 # preview what's inside
+dupfinder wipe --yes # irreversibly delete all documents
+dupfinder import-csv ./rows.csv --limit 2000
+```
+
+### Performance & tuning (advanced)
+
+Good defaults work for most users.
+
+```bash
+# Try a faster “auto” perf profile, bump MinHash perms and use a specific embed model
+dupfinder run-folder ./docs --perf-preset auto   --minhash-perm 128 --model-name all-MiniLM-L6-v2   --cand-per-doc 3000 --cand-total 5000000   --lsh-threshold 0.65 --shingle-size 3   --simhash-bits 128 --simhash-mode wshingle --simhash-wshingle 3
+```
+
+**Key flags** you might care about:
+- `--preset {balanced|high|recall}` – profile thresholds.  
+- `--calibration` – enable bootstrap calibration (OFF by default in CLI).  
+- **Perf**: `--perf-preset {auto|high-end|medium|light|high-throughput|high-recall|custom}`, `--workers`, `--emb-batch`, `--minhash-perm`, `--cand-per-doc`, `--cand-total`, `--model-name`.  
+- **SimHash**: `--simhash-bits`, `--simhash-mode {unigram|wshingle|cngram}`, `--simhash-wshingle`, `--simhash-cngram`, `--simhash-posbucket`, `--simhash-minlen`, `--simhash-maxw`, `--simhash-norm-strict` / `--no-simhash-norm-strict`, `--simhash-strip-ids` / `--no-simhash-strip-ids`.  
+- **Candidates**: `--lsh-threshold`, `--shingle-size`.  
+- **Self-training**: `--sl-epochs`, `--no-self-training`.  
+
+Reports are written as `reports/run_<RUN_ID>_<TIMESTAMP>.html`.
 
 
 ## Reports (what you'll see)
@@ -177,21 +199,6 @@ Each item may use any of these equivalent keys:
 
 Open via Run History -> Open report or by calling `generate_report(...)`.
 
-
-## Windows: run the packaged EXE
-
-- Double click AA660-DocAI.exe, or
-
-- From PowerShell:
-.\AA660-DocAI.exe
-
-First launch tips:
-
-- Windows SmartScreen may appear. Click More info -> Run anyway.
-
-- The first run can take longer while NLP models and font caches initialize.
-
-- The app will create needed folders in the current working directory.
 
 ## How it works
 
@@ -229,7 +236,7 @@ First launch tips:
 
 - raw: the model’s native similarity (cosine for embeddings, Jaccard for MinHash, Hamming based similarity for SimHash).
 
-- prob: calibrated probability of “duplicate” (0–1), derived from the bootstrap calibration.
+- prob: calibrated probability of “duplicate” (0–1), derived from the bootstrap calibration or raw probability if calibration is disabled.
 
 - The Arbiter compares per-learner probs to thresholds and uses consensus rules; uncertain cases get escalated.
 

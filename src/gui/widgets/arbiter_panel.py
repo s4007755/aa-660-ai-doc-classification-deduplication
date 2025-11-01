@@ -12,6 +12,14 @@ _OnChange = Optional[Callable[[ArbiterConfig], None]]
 _DEFAULT_STEPS = ["normalize_strict", "minhash_alt_shingle", "embed_whiten"]
 
 class ArbiterPanel(ttk.LabelFrame):
+    """
+    Tkinter UI panel for viewing/editing the Arbiter's consensus-related knobs.
+
+    This widget owns a set of Tk variables (IntVar/DoubleVar) that mirror
+    the fields in ArbiterConfig. Whenever a control changes, we emit a
+    new ArbiterConfig snapshot via on_change(config).
+    """
+
     # Panel for editing ArbiterConfig
     def __init__(
         self,
@@ -21,11 +29,18 @@ class ArbiterPanel(ttk.LabelFrame):
         on_change: _OnChange = None,
         text: str = "Arbiter / Consensus",
     ):
+        """
+        Parameters
+        master : tk.Widget
+        config : ArbiterConfig, optional
+        on_change : Callable[[ArbiterConfig], None], optional
+        text : str
+        """
         super().__init__(master, text=text, padding=8)
         self._on_change = on_change
         cfg = config or ArbiterConfig()
 
-        # vars
+        # Tk variables bound to UI controls
         self.var_require_agree = tk.IntVar(value=int(cfg.require_agreement))
         self.var_gray = tk.DoubleVar(value=float(cfg.gray_zone_margin))
         self.var_max_steps = tk.IntVar(value=int(cfg.max_escalation_steps))
@@ -33,7 +48,7 @@ class ArbiterPanel(ttk.LabelFrame):
         self.var_strong_margin = tk.DoubleVar(value=float(cfg.strong_margin))
         self.var_random_state = tk.IntVar(value=int(getattr(cfg, "random_state", 13)))
 
-        # header
+        # Header: radio buttons for consensus rule
         hdr = ttk.Frame(self)
         hdr.pack(fill=tk.X)
         ttk.Label(hdr, text="Consensus rule").pack(side=tk.LEFT)
@@ -41,16 +56,18 @@ class ArbiterPanel(ttk.LabelFrame):
         ttk.Radiobutton(rb, text="2 of 3", variable=self.var_require_agree, value=2, command=self._emit_change).pack(side=tk.LEFT)
         ttk.Radiobutton(rb, text="3 of 3", variable=self.var_require_agree, value=3, command=self._emit_change).pack(side=tk.LEFT, padx=(6, 0))
 
-        # thresholds
+        # Decision thresholds group
         rowf = ttk.LabelFrame(self, text="Decision thresholds")
         rowf.pack(fill=tk.X, pady=(8, 6))
 
+        # Gray-zone margin slider and live label
         ttk.Label(rowf, text="Gray-zone margin").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         l_gray = ttk.Label(rowf, text=f"{self.var_gray.get():.3f}")
         ttk.Scale(rowf, from_=0.0, to=0.20, variable=self.var_gray,
                   command=lambda *_: self._sync_label(l_gray, self.var_gray)).grid(row=0, column=1, sticky="we", padx=6)
         l_gray.grid(row=0, column=2, sticky="e", padx=6)
 
+        # Strong margin
         ttk.Label(rowf, text="Strong-margin (pseudo labels)").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         l_sm = ttk.Label(rowf, text=f"{self.var_strong_margin.get():.3f}")
         ttk.Scale(rowf, from_=0.0, to=0.20, variable=self.var_strong_margin,
@@ -59,12 +76,13 @@ class ArbiterPanel(ttk.LabelFrame):
 
         rowf.grid_columnconfigure(1, weight=1)
 
-        # escalation
+        # Escalation steps list
         esc = ttk.LabelFrame(self, text="Escalation steps")
         esc.pack(fill=tk.BOTH, expand=True, pady=(6, 6))
         left = ttk.Frame(esc); left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 3), pady=6)
         right = ttk.Frame(esc); right.pack(side=tk.LEFT, fill=tk.Y, padx=(3, 6), pady=6)
 
+        # Listbox holds step names, selection, buttons manipulate order/content
         self.listbox = tk.Listbox(left, height=6, activestyle="dotbox")
         self.listbox.pack(fill=tk.BOTH, expand=True)
         self._load_steps(cfg.escalation_order or _DEFAULT_STEPS)
@@ -78,21 +96,28 @@ class ArbiterPanel(ttk.LabelFrame):
         ttk.Button(right, text="Remove", command=self._remove_step).pack(fill=tk.X, pady=(4, 0))
         ttk.Button(right, text="Reset", command=self._reset_steps).pack(fill=tk.X, pady=(8, 0))
 
-        # self-learning
-        sl = ttk.LabelFrame(self, text="Self-learning")
+        # Self-training parameters (pseudo labels)
+        sl = ttk.LabelFrame(self, text="Self-training (pseudo-labels)")
         sl.pack(fill=tk.X, pady=(6, 0))
+        # Max self-learning epochs
         ttk.Label(sl, text="Max epochs").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Spinbox(sl, from_=0, to=50, textvariable=self.var_self_epochs, width=8, command=self._emit_change).grid(row=0, column=1, sticky="w", padx=6)
+        # Max escalation steps to attempt during gray-zone resolution
         ttk.Label(sl, text="Max escalation steps").grid(row=0, column=2, sticky="e", padx=6)
         ttk.Spinbox(sl, from_=0, to=10, textvariable=self.var_max_steps, width=8, command=self._emit_change).grid(row=0, column=3, sticky="w", padx=6)
+        # Random state
         ttk.Label(sl, text="Random state").grid(row=0, column=4, sticky="e", padx=6)
         ttk.Entry(sl, width=8, textvariable=self.var_random_state).grid(row=0, column=5, sticky="w", padx=6)
 
         for v in (self.var_gray, self.var_strong_margin, self.var_self_epochs, self.var_max_steps, self.var_random_state):
             v.trace_add("write", lambda *_: self._emit_change())
 
-    # get current config
+    # Get current config
     def get_config(self) -> ArbiterConfig:
+        """
+        Snapshot current UI state into a fresh ArbiterConfig instance.
+        This method is pure and does not mutate internal state.
+        """        
         return ArbiterConfig(
             require_agreement=int(self.var_require_agree.get()),
             gray_zone_margin=float(self.var_gray.get()),
@@ -103,8 +128,12 @@ class ArbiterPanel(ttk.LabelFrame):
             random_state=int(self.var_random_state.get()),
         )
 
-    # set from config
+    # Set from config
     def set_config(self, cfg: ArbiterConfig) -> None:
+        """
+        Apply an ArbiterConfig into the UI controls without bypassing the change callback.
+        Useful when loading profiles or restoring saved settings.
+        """        
         self.var_require_agree.set(int(cfg.require_agreement))
         self.var_gray.set(float(cfg.gray_zone_margin))
         self.var_max_steps.set(int(cfg.max_escalation_steps))
@@ -115,19 +144,31 @@ class ArbiterPanel(ttk.LabelFrame):
         self._emit_change()
 
     def set_gray_zone(self, margin: float) -> None:
+        """
+        Convenience setter for gray-zone margin.
+        """
         self.var_gray.set(float(margin))
         self._emit_change()
 
-    # listbox helpers
+    # Listbox helpers
     def _steps(self) -> List[str]:
+        """
+        Current escalation steps in the listbox.
+        """        
         return [self.listbox.get(i) for i in range(self.listbox.size())]
 
     def _load_steps(self, steps: List[str]) -> None:
+        """
+        Replace listbox contents with steps.
+        """        
         self.listbox.delete(0, tk.END)
         for s in steps:
             self.listbox.insert(tk.END, s)
 
     def _move_up(self):
+        """
+        Move the selected escalation step one position up.
+        """
         sel = self.listbox.curselection()
         if not sel: return
         i = sel[0]
@@ -139,6 +180,9 @@ class ArbiterPanel(ttk.LabelFrame):
         self._emit_change()
 
     def _move_down(self):
+        """
+        Move the selected escalation step one position down.
+        """        
         sel = self.listbox.curselection()
         if not sel: return
         i = sel[0]
@@ -150,6 +194,9 @@ class ArbiterPanel(ttk.LabelFrame):
         self._emit_change()
 
     def _add_step(self):
+        """
+        Append a new step from the entry box to the end of the list.
+        """        
         s = self.entry_new.get().strip()
         if not s: return
         self.listbox.insert(tk.END, s)
@@ -157,20 +204,33 @@ class ArbiterPanel(ttk.LabelFrame):
         self._emit_change()
 
     def _remove_step(self):
+        """
+        Remove the currently selected step.
+        """ 
         sel = self.listbox.curselection()
         if not sel: return
         self.listbox.delete(sel[0])
         self._emit_change()
 
     def _reset_steps(self):
+        """
+        Restore the default escalation order.
+        """       
         self._load_steps(_DEFAULT_STEPS)
         self._emit_change()
 
-    # callbacks
+    # Callbacks
     def _sync_label(self, lbl: ttk.Label, var: tk.DoubleVar):
+        """
+        Keep the numeric label next to a Scale in sync with the live value.
+        """    
         lbl.configure(text=f"{float(var.get()):.3f}")
 
     def _emit_change(self):
+        """
+        Emit a fresh ArbiterConfig to the listener, if any. All exceptions are swallowed
+        to keep the UI responsive.
+        """
         if self._on_change:
             try:
                 self._on_change(self.get_config())

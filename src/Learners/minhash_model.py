@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+"""
+MinHash/shingling-based learner.
+
+Overview
+* Tokenization into word or character shingles.
+* Jaccard similarity either exactly or via datasketch.MinHash.
+* Adaptive calibration (binning/Platt) with optional threshold override
+  from config extras.
+* Batch scoring with thread safe caches for shingles/minhash objects.
+"""
+
 import re
 import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 import numpy as np
 
@@ -33,19 +45,27 @@ from src.training.calibration import (
     apply_binning_or_platt,
 )
 
-# Tokenization / Jaccard utils
+# Tokenization/Jaccard utils
 
 _DEFAULT_SW = {
     "the","a","an","and","or","for","of","to","in","on","at","by","with","from","as",
     "is","are","was","were","be","been","it","this","that","these","those","you","your",
 }
 
-def _tokenize_words(s: str, *, strict: bool, min_len: int, stopwords: set[str], remove_stopwords: bool) -> List[str]:
+def _tokenize_words(
+    s: str,
+    *,
+    strict: bool,
+    min_len: int,
+    stopwords: set[str],
+    remove_stopwords: bool
+) -> List[str]:
+    """Simple whitespace tokenizer with optional punctuation stripping and stopword removal."""
     if not s:
         return []
     s = s.lower()
     if strict:
-        s = re.sub(r"[^\w\s]", " ", s)
+        s = re.sub(r"[^\w\s]", " ", s)  # keep word chars and space
     toks = s.split()
     out: List[str] = []
     for t in toks:
@@ -57,6 +77,7 @@ def _tokenize_words(s: str, *, strict: bool, min_len: int, stopwords: set[str], 
     return out
 
 def _word_shingles(tokens: List[str], k: int) -> List[str]:
+    """k-gram shingles over tokens."""
     if k <= 1:
         return tokens[:]
     if not tokens or len(tokens) < k:
@@ -64,11 +85,13 @@ def _word_shingles(tokens: List[str], k: int) -> List[str]:
     return [" ".join(tokens[i : i + k]) for i in range(len(tokens) - k + 1)]
 
 def _char_shingles(s: str, k: int) -> List[str]:
+    """Overlapping character k-grams."""
     if not s or k <= 0 or len(s) < k:
         return []
     return [s[i : i + k] for i in range(len(s) - k + 1)]
 
 def _jaccard_from_sets(a: List[str], b: List[str]) -> float:
+    """Exact Jaccard similarity between sets of shingles."""
     if not a and not b:
         return 0.0
     sa, sb = set(a), set(b)
@@ -78,10 +101,12 @@ def _jaccard_from_sets(a: List[str], b: List[str]) -> float:
         return 0.0
     return float(inter) / float(union)
 
+
 # Internal state
 
 @dataclass
 class _State:
+    """Transient calibration artifacts."""
     edges: Optional[np.ndarray] = None
     probs: Optional[np.ndarray] = None
     platt_a: Optional[float] = None
@@ -95,24 +120,31 @@ class MinHashLearner(ILearner):
         return "minhash"
 
     def __init__(self, config: Optional[LearnerConfig] = None):
+        """
+        Construct MinHash learner.
+        """
         self._config: LearnerConfig = config or LearnerConfig()
         self._state: LearnerState = make_fresh_state("minhash init")
         self._istate = _State(edges=None, probs=None, platt_a=None, platt_b=None)
         self._stopwords = set(_DEFAULT_SW)
 
-    # config/state
+
+    # Config/state
 
     @property
     def config(self) -> LearnerConfig:
         return self._config
 
     def configure(self, config: LearnerConfig) -> None:
+        """Update runtime config, refresh stopwords and threshold view."""
         self._config = config
         extras = config.extras or {}
         sw_extra = set(map(str.lower, extras.get("stopwords", [])))
         self._stopwords = set(_DEFAULT_SW) | sw_extra
+        self._ensure_threshold_from_config()
 
     def load_state(self, state: Optional[LearnerState]) -> None:
+        """Load persisted calibration artifacts and keep threshold consistent with extras."""
         self._state = state or make_fresh_state("minhash fresh")
         lp = self._state.learned_params or {}
         edges = np.array(lp.get("bin_edges", []), dtype=np.float32)
@@ -121,19 +153,33 @@ class MinHashLearner(ILearner):
         self._istate.probs = probs if probs.size else None
         self._istate.platt_a = lp.get("platt_a")
         self._istate.platt_b = lp.get("platt_b")
+        self._ensure_threshold_from_config()
 
     def get_state(self) -> LearnerState:
         return self._state
 
     def prepare(self, corpus_stats: Optional[CorpusStats] = None) -> None:
+        """No heavy model to load, ensure threshold reflects config extras."""
+        self._ensure_threshold_from_config()
         pass
 
-    # scoring
+
+    # Scoring
 
     def score_pair(self, a: DocumentView, b: DocumentView) -> LearnerOutput:
+        """
+        Score a single pair:
+
+        - Build shingles and compute Jaccard.
+        - Calibrate to probability using learned binning/Platt.
+        - Emit rationale with basic overlap stats and shingling params.
+        """
         jaccard, sample_shared, overlap_count, universe_size = self._score_and_sample(a, b)
-        prob = apply_binning_or_platt(jaccard, self._state.calibration, self._istate.edges, self._istate.probs)
-        th = self._state.calibration.threshold
+        cal = self._state.calibration or CalibrationParams(
+            method="none", params={}, threshold=None, brier_score=None, reliability_bins=[]
+        )
+        prob = apply_binning_or_platt(jaccard, cal, self._istate.edges, self._istate.probs)
+        th = cal.threshold
 
         warns: List[str] = []
         if universe_size == 0:
@@ -157,7 +203,6 @@ class MinHashLearner(ILearner):
             internals=None,
         )
 
-
     def _score_one(
         self,
         a: DocumentView,
@@ -168,18 +213,21 @@ class MinHashLearner(ILearner):
         cache_shingles: Dict[str, List[str]],
         cache_minhash: Dict[str, Any],
         num_perm: int,
+        cache_lock: Optional["threading.Lock"],
     ) -> LearnerOutput:
         """Compute score and probability for a single pair."""
         if use_minhash:
-            jaccard = self._jaccard_minhash(a, b, cache_shingles, cache_minhash, num_perm)
+            jaccard = self._jaccard_minhash(a, b, cache_shingles, cache_minhash, num_perm, cache_lock)
+            sh_a = self._get_shingles_cached(a, cache_shingles, lock=cache_lock)
+            sh_b = self._get_shingles_cached(b, cache_shingles, lock=cache_lock)
         else:
-            sh_a = self._get_shingles_cached(a, cache_shingles)
-            sh_b = self._get_shingles_cached(b, cache_shingles)
+            sh_a = self._get_shingles_cached(a, cache_shingles, lock=cache_lock)
+            sh_b = self._get_shingles_cached(b, cache_shingles, lock=cache_lock)
             jaccard = _jaccard_from_sets(sh_a, sh_b)
 
         prob = apply_binning_or_platt(jaccard, self._state.calibration, edges, probs)
         warns: List[str] = []
-        if not self._get_shingles_cached(a, cache_shingles) and not self._get_shingles_cached(b, cache_shingles):
+        if not sh_a and not sh_b:
             warns.append("Both sides produced no shingles after preprocessing")
 
         rationale = {
@@ -195,14 +243,20 @@ class MinHashLearner(ILearner):
             warnings=warns,
         )
 
-
     def batch_score(
         self,
         pairs: Iterable[Pair],
         use_parallel: bool = True,
         max_workers: int = os.cpu_count() or 4
     ) -> List[LearnerOutput]:
-        """Compute scores for multiple pairs, optionally in parallel."""
+        """
+        Compute scores for multiple pairs with optional parallelization.
+
+        Implementation notes
+        - Caches shingles and MinHash objects in shared dicts.
+        - A lock guards cache population to avoid duplication in threads.
+        - Falls back to sequential path for tiny batches.
+        """
         pairs_list = list(pairs)
         if not pairs_list:
             return []
@@ -212,19 +266,23 @@ class MinHashLearner(ILearner):
         num_perm = int(self._config.extras.get("num_perm", 64))
         cache_shingles: Dict[str, List[str]] = {}
         cache_minhash: Dict[str, Any] = {}
+        cache_lock = threading.Lock()
 
         # Sequential fallback
         if not use_parallel or len(pairs_list) < 4:
             return [
-                self._score_one(a, b, edges, probs, use_minhash, cache_shingles, cache_minhash, num_perm)
+                self._score_one(a, b, edges, probs, use_minhash, cache_shingles, cache_minhash, num_perm, cache_lock)
                 for a, b in pairs_list
             ]
 
         # Parallel execution
         outs: List[LearnerOutput] = []
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self._score_one, a, b, edges, probs, use_minhash, cache_shingles, cache_minhash, num_perm): (a, b)
+                executor.submit(
+                    self._score_one,
+                    a, b, edges, probs, use_minhash, cache_shingles, cache_minhash, num_perm, cache_lock
+                ): (a, b)
                 for a, b in pairs_list
             }
             for future in as_completed(futures):
@@ -237,9 +295,21 @@ class MinHashLearner(ILearner):
         return outs
 
 
-    # training
+    # Training
 
     def fit_calibration(self, positives: Iterable[Pair], negatives: Iterable[Pair]) -> LearnerState:
+        """
+        Fit adaptive calibration and choose an operating threshold.
+
+        Steps
+        1) Precompute shingles for unique docs.
+        2) Compute Jaccard scores for all pairs (vectorized over sets).
+        3) Run calibrate_adaptive_and_select_threshold to obtain:
+           - CalibrationParams (with chosen threshold)
+           - Optional Platt parameters
+           - Optional binning arrays
+        4) Persist artifacts in state.learned_params.
+        """
         pos_pairs = list(positives)
         neg_pairs = list(negatives)
         if not pos_pairs and not neg_pairs:
@@ -291,9 +361,11 @@ class MinHashLearner(ILearner):
         return self._state
 
     def self_train(self, pseudo_labels: Iterable[PairLabel]) -> LearnerState:
+        """Placeholder"""
         return self._state
 
-    # internals
+
+    # Internals
 
     def _get_tokenizer_mode(self) -> str:
         return str(self._config.extras.get("tokenizer_mode", "word"))
@@ -314,11 +386,16 @@ class MinHashLearner(ILearner):
         return bool(self._config.extras.get("strip_dates_ids", False))
 
     def _raw_score(self, a: DocumentView, b: DocumentView) -> float:
+        """Uncalibrated Jaccard similarity on shingle sets."""
         sh_a = self._get_shingles(a)
         sh_b = self._get_shingles(b)
         return _jaccard_from_sets(sh_a, sh_b)
 
     def _score_and_sample(self, a: DocumentView, b: DocumentView) -> Tuple[float, List[str], int, int]:
+        """
+        Compute exact Jaccard and provide a small sample of shared shingles plus
+        overlap/universe sizes for rationale display.
+        """
         sh_a = self._get_shingles(a)
         sh_b = self._get_shingles(b)
         sa, sb = set(sh_a), set(sh_b)
@@ -328,14 +405,26 @@ class MinHashLearner(ILearner):
         sample_shared = [t for t, _ in Counter(list(inter)).most_common(5)]
         return j, sample_shared, len(inter), len(union)
 
-    def _get_shingles_cached(self, d: DocumentView, cache: Dict[str, List[str]]) -> List[str]:
+    def _get_shingles_cached(
+        self,
+        d: DocumentView,
+        cache: Dict[str, List[str]],
+        lock: Optional["threading.Lock"] = None,
+    ) -> List[str]:
+        """Thread-safe memoization of shingles by doc_id."""
         if d.doc_id in cache:
             return cache[d.doc_id]
         sh = self._get_shingles(d)
+        if lock:
+            with lock:
+                # double check in case another thread filled it
+                cache.setdefault(d.doc_id, sh)
+            return cache[d.doc_id]
         cache[d.doc_id] = sh
         return sh
 
     def _get_shingles(self, d: DocumentView) -> List[str]:
+        """Shingle a document according to current tokenizer/shingling config."""
         mode = self._get_tokenizer_mode()
         k = self._get_shingle_size()
         strict = self._normalize_strict()
@@ -366,19 +455,28 @@ class MinHashLearner(ILearner):
         cache_shingles: Dict[str, List[str]],
         cache_minhash: Dict[str, Any],
         num_perm: int,
+        cache_lock: Optional["threading.Lock"],
     ) -> float:
+        """
+        Approximate Jaccard using datasketch.MinHash, fall back to exact
+        set-based Jaccard when MinHash is unavailable or errors occur.
+        """
         if MinHash is None:
-            sh_a = self._get_shingles_cached(a, cache_shingles)
-            sh_b = self._get_shingles_cached(b, cache_shingles)
+            sh_a = self._get_shingles_cached(a, cache_shingles, lock=cache_lock)
+            sh_b = self._get_shingles_cached(b, cache_shingles, lock=cache_lock)
             return _jaccard_from_sets(sh_a, sh_b)
 
         def get_mh(doc: DocumentView) -> Any:
             if doc.doc_id in cache_minhash:
                 return cache_minhash[doc.doc_id]
-            sh = self._get_shingles_cached(doc, cache_shingles)
+            sh = self._get_shingles_cached(doc, cache_shingles, lock=cache_lock)
             mh = MinHash(num_perm=num_perm)
             for s in sh:
                 mh.update(s.encode("utf-8", errors="ignore"))
+            if cache_lock:
+                with cache_lock:
+                    cache_minhash.setdefault(doc.doc_id, mh)
+                return cache_minhash[doc.doc_id]
             cache_minhash[doc.doc_id] = mh
             return mh
 
@@ -387,6 +485,55 @@ class MinHashLearner(ILearner):
         try:
             return float(mh1.jaccard(mh2))
         except Exception:
-            sh_a = self._get_shingles_cached(a, cache_shingles)
-            sh_b = self._get_shingles_cached(b, cache_shingles)
+            # If MinHash fails, compute exact Jaccard for this pair only.
+            sh_a = self._get_shingles_cached(a, cache_shingles, lock=cache_lock)
+            sh_b = self._get_shingles_cached(b, cache_shingles, lock=cache_lock)
             return _jaccard_from_sets(sh_a, sh_b)
+
+    def _ensure_threshold_from_config(self) -> None:
+        """
+        Sync a threshold override from config extras into the active calibration.
+
+        Priority (first non-None wins):
+          decision_threshold -> threshold -> cosine_threshold (legacy) -> config.threshold
+
+        Behaviour
+        - If `force_threshold` is True, set method='none' and adopt the provided
+          threshold unconditionally.
+        - Otherwise, override only "default-looking" calibrations (method='none'
+          and threshold element of {None, 0.5, 0.75} and no learned_params) or when the
+          current threshold is None.
+        """
+        ex = self._config.extras or {}
+        # Primary: decision_threshold (minhash)
+        thr = (
+            ex.get("decision_threshold")    # primary for minhash
+            or ex.get("threshold")
+            or ex.get("cosine_threshold")
+            or getattr(self._config, "threshold", None)
+        )
+        if thr is None:
+            return
+
+        force = bool(ex.get("force_threshold", False))
+
+        cal = self._state.calibration
+        if cal is None:
+            self._state.calibration = CalibrationParams(
+                method="none", params={}, threshold=float(thr),
+                brier_score=None, reliability_bins=[]
+            )
+            return
+
+        if force:
+            cal.method = "none"
+            cal.threshold = float(thr)
+            return
+
+        looks_default = (
+            (cal.method == "none")
+            and (cal.threshold in (None, 0.5, 0.75))
+            and not self._state.learned_params
+        )
+        if looks_default or cal.threshold is None:
+            cal.threshold = float(thr)

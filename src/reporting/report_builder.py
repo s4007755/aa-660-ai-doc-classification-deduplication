@@ -7,6 +7,7 @@ import os
 import base64
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+import math
 
 from src.persistence import state_store as store
 from src.metrics.metrics import metrics_snapshot
@@ -24,8 +25,9 @@ try:
 except Exception:
     _HAVE_MPL = False
 
+import numpy as np
 
-# small helpers
+# Small helpers
 def _get(obj: Any, key: str, default=None):
     if obj is None:
         return default
@@ -63,7 +65,7 @@ def _esc(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-# public API
+# Public API
 def generate_report(
     run_id: int,
     *,
@@ -85,11 +87,20 @@ def generate_report(
         except Exception:
             continue
 
+    # thresholds from any saved calibration, briers are shown only if present
     thresholds, briers = _collect_thresholds_briers(cal_rows)
 
-    # build pseudo labels so charts & per-learner metrics have data
+    # build pseudo labels from final labels so charts and per-learner metrics have data
     pseudo = _pseudo_from_traces(traces_json)
 
+    basics = _basics_from_traces(traces_json, thresholds, pseudo)
+
+    # decide whether per-learner (AUC/Brier/Threshold) is shown
+    has_calibration = any(isinstance(v, (int, float)) for v in thresholds.values()) \
+                      or any((_get(row, "reliability_json") or _get(row, "reliability")) for row in cal_rows)
+
+
+    # metrics snapshot
     snapshot = metrics_snapshot(
         _as_traces_with_thresholds(traces_json, thresholds),
         pseudo_labels=pseudo,
@@ -106,15 +117,29 @@ def generate_report(
     run_table = _run_table(snapshot.get("run", {}), traces_json)
     per_learner_rows = _per_learner_rows(snapshot.get("per_learner", {}) or {}, thresholds)
     examples = _select_examples(traces_json, labels=labels)
-    clusters = snapshot.get("clusters", [])
+    clusters = snapshot.get("clusters", []) or []
 
     # Charts per learner (reliability, ROC, PR, threshold sweep, histogram)
     charts = snapshot.get("charts", {}) or {}
     chart_imgs = _render_all_charts(charts)
 
+    # Vote-rate and reasons tables
+    votes = snapshot.get("votes", {}) or {}
+    reasons = snapshot.get("reasons", {}) or {}
+
+    vote_rows = [
+        [name, str(v.get("support", 0)), f"{float(v.get('vote_rate', 0.0)):.3f}"]
+        for name, v in sorted(votes.items())
+    ]
+    reasons_rows = [
+        [reason, str(cnt)]
+        for reason, cnt in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
     # File name: stable
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     if fmt.lower() == "md":
+        # Markdown path
         content = _render_markdown(
             run_id, started, ended, notes, cfg_str, cal_table, run_table,
             per_learner_rows, examples, clusters, labels
@@ -125,9 +150,12 @@ def generate_report(
             f.write(content)
         return os.path.abspath(path)
     else:
+        # HTML path
         content = _render_html(
             run_id, started, ended, notes, cfg_str, cal_table, run_table,
-            per_learner_rows, examples, clusters, labels, chart_imgs, traces_json
+            per_learner_rows if has_calibration else [],
+            basics,
+            examples, clusters, labels, chart_imgs, traces_json
         )
         filename = f"run_{run_id}_{ts}.html"
         path = os.path.join(out_dir, filename)
@@ -136,7 +164,8 @@ def generate_report(
         return os.path.abspath(path)
 
 
-# persistence helpers
+# Persistence helpers
+
 def _safe_get_calibrations(run_id: int) -> List[Dict[str, Any]]:
     try:
         if hasattr(store, "get_calibrations_for_run"):
@@ -186,7 +215,7 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
         thresholds[name] = thr if isinstance(thr, (int, float)) else None
         briers[name] = br if isinstance(br, (int, float)) else None
 
-    # prefer values saved on learner state if present
+    # Prefer values saved on learner state if present
     for row in cal_rows:
         name = row.get("learner_name") or row.get("learner") or ""
         if not name:
@@ -212,7 +241,8 @@ def _collect_thresholds_briers(cal_rows: List[Dict[str, Any]]) -> Tuple[Dict[str
     return thresholds, briers
 
 
-# snapshot helpers
+# Snapshot helpers
+
 def _pseudo_from_traces(traces_json: List[Dict[str, Any]]) -> Dict[str, int]:
     pseudo: Dict[str, int] = {}
     for t in traces_json:
@@ -229,12 +259,22 @@ def _as_traces_with_thresholds(traces_json: List[Dict[str, Any]], thresholds: Di
         ln: Dict[str, Any] = {}
         learners_map = obj.get("learners") or {}
         for k, v in learners_map.items():
+            # pull both prob and raw_score, with safe fallbacks
             try:
-                prob = float(_get(v, "prob", 0.0))
+                prob = float(v.get("prob", 0.0))
             except Exception:
                 prob = 0.0
+            try:
+                raw = float(v.get("raw_score", prob))  # fallback to prob if raw_score missing
+            except Exception:
+                raw = prob
+
             thr = thresholds.get(k)
-            ln[k] = SimpleNamespace(prob=prob, threshold=(float(thr) if isinstance(thr, (int, float)) else None))
+            ln[k] = SimpleNamespace(
+                prob=prob,
+                raw_score=raw,
+                threshold=(float(thr) if isinstance(thr, (int, float)) else None),
+            )
         out.append(
             SimpleNamespace(
                 pair_key=obj.get("pair_key"),
@@ -248,8 +288,87 @@ def _as_traces_with_thresholds(traces_json: List[Dict[str, Any]], thresholds: Di
         )
     return out
 
+def _basics_from_traces(
+    traces_json: List[Dict[str, Any]],
+    thresholds: Dict[str, Optional[float]],
+    pseudo: Dict[str, int],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Replicates the always-on Basics table shown in the GUI for each learner:
+      n, near-dup/uncertain counts & rates, score min/max/mean/std,
+      threshold presence, %>=thr, TP/FP/TN/FN at thr, Precision/Recall/F1@thr.
+    """
 
-# table builders
+    scores: Dict[str, List[float]] = {}
+    labels: Dict[str, List[int]] = {}
+    # collect scores and labels
+    for t in traces_json:
+        pk = t.get("pair_key")
+        if pk not in pseudo:  # use only near-dup(1) vs uncertain(0)
+            continue
+        lrns = t.get("learners") or {}
+        for name, v in lrns.items():
+            try:
+                sc = float(v.get("prob", 0.0))
+            except Exception:
+                continue
+            scores.setdefault(name, []).append(sc)
+            labels.setdefault(name, []).append(int(pseudo[pk]))
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for name in sorted(set(scores.keys()) | set(labels.keys())):
+        p = scores.get(name, [])
+        y = labels.get(name, [])
+        n = len(p)
+        pos = sum(y)
+        neg = n - pos
+        th = thresholds.get(name)
+        row: Dict[str, Any] = {
+            "n": n,
+            "near_dup_count": pos,
+            "uncertain_count": neg,
+            "near_dup_rate": (pos / n) if n else 0.0,
+            "score_mean": (sum(p) / n) if n else None,
+            "score_std": (float(np.std(np.asarray(p, dtype=np.float32))) if n else None),
+            "score_min": (min(p) if n else None),
+            "score_max": (max(p) if n else None),
+            "has_threshold": isinstance(th, (int, float)),
+            "threshold": (float(th) if isinstance(th, (int, float)) else None),
+            "pct_ge_threshold": None,
+            "tp": None, "fp": None, "tn": None, "fn": None,
+            "precision_at_thr": None, "recall_at_thr": None, "f1_at_thr": None,
+        }
+        if n and isinstance(th, (int, float)):
+            pred = [1 if v >= float(th) else 0 for v in p]
+            tp = sum(1 for i in range(n) if pred[i] == 1 and y[i] == 1)
+            fp = sum(1 for i in range(n) if pred[i] == 1 and y[i] == 0)
+            tn = sum(1 for i in range(n) if pred[i] == 0 and y[i] == 0)
+            fn = sum(1 for i in range(n) if pred[i] == 0 and y[i] == 1)
+            row.update({
+                "pct_ge_threshold": (sum(pred) / n) if n else 0.0,
+                "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            })
+            prec = (tp / (tp + fp)) if (tp + fp) > 0 else 1.0 if (tp + fp + fn) > 0 else None
+            rec  = (tp / (tp + fn)) if (tp + fn) > 0 else 0.0 if (tp + fp + fn) > 0 else None
+            f1   = (2 * prec * rec / (prec + rec)) if (prec is not None and rec is not None and (prec + rec) > 0) else None
+            row.update({
+                "precision_at_thr": (None if prec is None else float(prec)),
+                "recall_at_thr": (None if rec is None else float(rec)),
+                "f1_at_thr": (None if f1 is None else float(f1)),
+            })
+        out[name] = row
+    return out
+
+def _fmt_basic(x: Any, nd: int = 3) -> str:
+    if x is None:
+        return ""
+    try:
+        return f"{float(x):.{nd}f}"
+    except Exception:
+        return str(x)
+
+
+# Table builders
 def _calibration_table(cal_rows: List[Dict[str, Any]], thresholds: Dict[str, Any], briers: Dict[str, Any]):
     rows = []
     for r in cal_rows:
@@ -258,12 +377,16 @@ def _calibration_table(cal_rows: List[Dict[str, Any]], thresholds: Dict[str, Any
         reliability = r.get("reliability_json") or r.get("reliability") or "[]"
         try:
             rb = json.loads(reliability) if isinstance(reliability, str) else reliability
+            if not rb:
+                # Skip empty calibration snapshots
+                continue
             rb_str = ", ".join(
                 f"{_get(x,'prob_center',0.0):.2f}:{_get(x,'observed_pos_rate',0.0):.2f}({_get(x,'count',0)})"
                 for x in (rb or [])[:6]
             )
         except Exception:
-            rb_str = "-"
+            continue
+
         rows.append(
             {
                 "learner": name,
@@ -319,7 +442,7 @@ def _per_learner_rows(per_learner: Dict[str, Any], thresholds: Dict[str, Optiona
                 _fmt_num(thresholds.get(name)),
             ]
         )
-    # keep consistent order
+    # Keep consistent order
     order = {"simhash": 0, "minhash": 1, "embedding": 2}
     rows.sort(key=lambda r: order.get(r[0].split()[0].lower(), 99))
     return rows
@@ -386,7 +509,91 @@ def _pretty_doc(doc_id: Optional[str], labels: Dict[str, str]) -> str:
     return f"{name} ({doc_id[:8]})" if name else doc_id
 
 
-# chart helpers
+def _basics_html(basics: Dict[str, Dict[str, Any]]) -> str:
+    if not basics:
+        return "<p class='muted'>No per-learner basics available.</p>"
+    parts = []
+    order = {"simhash": 0, "minhash": 1, "embedding": 2}
+    for learner in sorted(basics.keys(), key=lambda k: order.get(k.lower().split()[0], 99)):
+        b = basics[learner]
+        rows = [
+            ["Pairs (n)", str(b.get("n", 0))],
+            ["Near-dup count", str(b.get("near_dup_count", 0))],
+            ["Uncertain count", str(b.get("uncertain_count", 0))],
+            ["Near-dup rate", _fmt_basic(b.get("near_dup_rate"))],
+            ["Score mean", _fmt_basic(b.get("score_mean"))],
+            ["Score std", _fmt_basic(b.get("score_std"))],
+            ["Score min", _fmt_basic(b.get("score_min"))],
+            ["Score max", _fmt_basic(b.get("score_max"))],
+            ["Has threshold", "yes" if b.get("has_threshold") else "no"],
+            ["Threshold", _fmt_basic(b.get("threshold"))],
+            ["% ≥ threshold", _fmt_basic(b.get("pct_ge_threshold"))],
+            ["TP", str(b.get("tp") if b.get("tp") is not None else "")],
+            ["FP", str(b.get("fp") if b.get("fp") is not None else "")],
+            ["TN", str(b.get("tn") if b.get("tn") is not None else "")],
+            ["FN", str(b.get("fn") if b.get("fn") is not None else "")],
+            ["Precision@thr", _fmt_basic(b.get("precision_at_thr"))],
+            ["Recall@thr", _fmt_basic(b.get("recall_at_thr"))],
+            ["F1@thr", _fmt_basic(b.get("f1_at_thr"))],
+        ]
+        parts.append(f"<h3>{_esc(learner.capitalize())}</h3>")
+        parts.append(_table_html(["Metric", "Value"], rows))
+    return "\n".join(parts)
+
+
+def _basics_inline_html(basics: Dict[str, Dict[str, Any]]) -> str:
+    if not basics:
+        return "<p class='muted'>No per-learner basics available.</p>"
+    order = {"simhash": 0, "minhash": 1, "embedding": 2}
+    cols: List[str] = []
+    for learner in sorted(basics.keys(), key=lambda k: order.get(k.lower().split()[0], 99)):
+        b = basics[learner]
+        rows = [
+            ["Pairs (n)", str(b.get("n", 0))],
+            ["Near-dup count", str(b.get("near_dup_count", 0))],
+            ["Uncertain count", str(b.get("uncertain_count", 0))],
+            ["Near-dup rate", _fmt_basic(b.get("near_dup_rate"))],
+            ["Score mean", _fmt_basic(b.get("score_mean"))],
+            ["Score std", _fmt_basic(b.get("score_std"))],
+            ["Score min", _fmt_basic(b.get("score_min"))],
+            ["Score max", _fmt_basic(b.get("score_max"))],
+            ["Has threshold", "yes" if b.get("has_threshold") else "no"],
+            ["Threshold", _fmt_basic(b.get("threshold"))],
+            ["% ≥ threshold", _fmt_basic(b.get("pct_ge_threshold"))],
+            ["TP", str(b.get("tp") if b.get("tp") is not None else "")],
+            ["FP", str(b.get("fp") if b.get("fp") is not None else "")],
+            ["TN", str(b.get("tn") if b.get("tn") is not None else "")],
+            ["FN", str(b.get("fn") if b.get("fn") is not None else "")],
+            ["Precision@thr", _fmt_basic(b.get("precision_at_thr"))],
+            ["Recall@thr", _fmt_basic(b.get("recall_at_thr"))],
+            ["F1@thr", _fmt_basic(b.get("f1_at_thr"))],
+        ]
+        cols.append(
+            f"<div class='card'><h3>{_esc(learner.capitalize())}</h3>"
+            f"{_table_html(['Metric','Value'], rows)}</div>"
+        )
+    return "<div class='three-cols'>" + "".join(cols) + "</div>"
+
+
+def _charts_inline_html(chart_imgs: Dict[str, Dict[str, str]]) -> str:
+    if not chart_imgs:
+        return "<p class='muted'>Charts unavailable.</p>"
+    order = {"simhash": 0, "minhash": 1, "embedding": 2}
+    learners = sorted(chart_imgs.keys(), key=lambda k: order.get(k.lower().split()[0], 99))
+    cols: List[str] = []
+    for learner in learners:
+        imgs = chart_imgs.get(learner, {})
+        tiles = []
+        for key in ("reliability", "roc", "pr", "thr", "hist"):
+            if imgs.get(key):
+                tiles.append(f"<div><img class='chart' src='{imgs[key]}' alt='{_esc(learner)} {key}'></div>")
+        content = "<div class='charts-grid'>" + "".join(tiles) + "</div>" if tiles else "<p class='muted'>No charts for this learner.</p>"
+        cols.append(f"<div class='card'><h3>{_esc(learner.capitalize())}</h3>{content}</div>")
+    return "<div class='three-cols'>" + "".join(cols) + "</div>"
+
+
+# Chart helpers
+
 def _render_all_charts(charts: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     out: Dict[str, Dict[str, str]] = {}
     if not _HAVE_MPL:
@@ -394,54 +601,62 @@ def _render_all_charts(charts: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     for name, chart in (charts or {}).items():
         imgs: Dict[str, str] = {}
 
-        # Reliability
+        # Reliability (only with bins)
         rel = chart.get("reliability") or []
-        xs = [_get(r, "expected_pos_rate", 0.0) for r in rel]
-        ys = [_get(r, "observed_pos_rate", 0.0) for r in rel]
-        imgs["reliability"] = _line_to_data_uri(
-            xs, ys,
-            "Predicted probability", "Observed positive rate",
-            "Reliability curve", diag=True
-        )
+        if isinstance(rel, list) and len(rel) >= 3:
+            xs = [float(_get(r, "expected_pos_rate", 0.0)) for r in rel]
+            ys = [float(_get(r, "observed_pos_rate", 0.0)) for r in rel]
+            imgs["reliability"] = _line_to_data_uri(xs, ys, "Predicted probability", "Observed positive rate", "Reliability curve", diag=True)
 
-        # ROC
+        # ROC (need variation)
         roc = chart.get("roc") or {}
-        imgs["roc"] = _line_to_data_uri(
-            roc.get("fpr") or [0, 1], roc.get("tpr") or [0, 1],
-            "False Positive Rate", "True Positive Rate",
-            f"ROC (AUC={_fmt_num(roc.get('auc'))})", diag=True
-        )
+        fpr = list(map(float, roc.get("fpr") or [])); tpr = list(map(float, roc.get("tpr") or []))
+        if len(set(fpr)) >= 3 and len(set(tpr)) >= 3:
+            imgs["roc"] = _line_to_data_uri(fpr, tpr, "False Positive Rate", "True Positive Rate", f"ROC (AUC={_fmt_num(roc.get('auc'))})", diag=True)
 
-        # PR
+        # PR (need variation)
         pr = chart.get("pr") or {}
-        imgs["pr"] = _line_to_data_uri(
-            pr.get("recall") or [0, 1], pr.get("precision") or [1, 0],
-            "Recall", "Precision", "Precision–Recall"
-        )
+        precision = list(map(float, pr.get("precision") or [])); recall = list(map(float, pr.get("recall") or []))
+        if len(set(precision)) >= 3 and len(set(recall)) >= 3:
+            imgs["pr"] = _line_to_data_uri(recall, precision, "Recall", "Precision", "Precision–Recall")
 
-        # Threshold sweep
+        # Threshold sweep (need multiple uniq thresholds and changing curves)
         ts = chart.get("thr_sweep") or {}
-        imgs["thr"] = _multi_to_data_uri(
-            ts.get("thresholds") or [0, 1],
-            [ts.get("precision") or [1, 1], ts.get("recall") or [0, 1], ts.get("f1") or [0, 1]],
-            ["Precision", "Recall", "F1"],
-            "Threshold", "Score", "Threshold sweep", ylim=(0.0, 1.05)
-        )
+        ths = list(map(float, ts.get("thresholds") or []))
+        prec_s = list(map(float, ts.get("precision") or []))
+        rec_s  = list(map(float, ts.get("recall") or []))
+        f1_s   = list(map(float, ts.get("f1") or []))
+        if len(set(ths)) >= 5 and (len(set(prec_s)) > 1 or len(set(rec_s)) > 1 or len(set(f1_s)) > 1):
+            imgs["thr"] = _multi_to_data_uri(ths, [prec_s, rec_s, f1_s], ["Precision","Recall","F1"], "Threshold", "Score", "Threshold sweep", ylim=(0.0, 1.05))
 
-        # Histogram
+        # Histogram (render if any counts exist, label clearly)
         hist = chart.get("hist") or {}
-        imgs["hist"] = _hist_to_data_uri(
-            hist.get("bin_edges") or [0.0, 1.0],
-            hist.get("pos") or [0],
-            hist.get("neg") or [0],
-            "Calibrated probability", "Count", "Score distribution"
-        )
+        edges = hist.get("bin_edges") or []
+        pos   = hist.get("pos") or []; neg = hist.get("neg") or []
+        total_counts = (sum(pos) + sum(neg)) if edges else 0
+        if len(edges) >= 2 and total_counts > 0:
+            imgs["hist"] = _hist_to_data_uri(
+                edges, pos, neg,
+                "Score (0 = Uncertain, 1 = Near-duplicate)",
+                "Number of pairs",
+                "Learner score distribution (Near-duplicate vs Uncertain)"
+            )
 
-        out[name] = imgs
+
+        if imgs:
+            out[name] = imgs
     return out
 
 
+
 def _line_to_data_uri(xs, ys, xlabel, ylabel, title, diag=False) -> str:
+    # guard: need at least two points
+    try:
+        if not xs or not ys or len(xs) < 2 or len(ys) < 2:
+            return ""
+    except Exception:
+        return ""
+
     fig, ax = plt.subplots(figsize=(5.0, 3.1), dpi=110)
     if diag:
         ax.plot([min(xs + [0]), max(xs + [1])], [min(ys + [0]), max(ys + [1])], linestyle="--", alpha=0.4)
@@ -453,9 +668,20 @@ def _line_to_data_uri(xs, ys, xlabel, ylabel, title, diag=False) -> str:
 
 
 def _multi_to_data_uri(xs, y_list, labels, xlabel, ylabel, title, ylim=None) -> str:
+    # guard: thresholds and at least one non-empty series with >=2 points
+    try:
+        if not xs or len(xs) < 2:
+            return ""
+        ok_series = any(y and len(y) >= 2 for y in (y_list or []))
+        if not ok_series:
+            return ""
+    except Exception:
+        return ""
+
     fig, ax = plt.subplots(figsize=(5.0, 3.1), dpi=110)
     for y, lab in zip(y_list, labels):
-        ax.plot(xs, y, label=lab)
+        if y and len(y) >= 2:
+            ax.plot(xs, y, label=lab)
     if ylim:
         ax.set_ylim(*ylim)
     ax.set_xlabel(xlabel); ax.set_ylabel(ylabel); ax.set_title(title); ax.legend(); ax.grid(True, alpha=0.3)
@@ -464,18 +690,26 @@ def _multi_to_data_uri(xs, y_list, labels, xlabel, ylabel, title, ylim=None) -> 
 
 
 def _hist_to_data_uri(edges, pos, neg, xlabel, ylabel, title) -> str:
-    edges = list(edges)
-    centers = [(edges[i] + edges[i+1]) / 2.0 for i in range(len(edges)-1)] if len(edges) > 1 else [0.5]
-    width = (edges[1]-edges[0]) * 0.9 if len(edges) > 1 else 0.5
+    try:
+        edges = list(edges or [])
+        pos = list(pos or [])
+        neg = list(neg or [])
+        if len(edges) < 2 or ((sum(pos) + sum(neg)) <= 0):
+            return ""
+    except Exception:
+        return ""
+
+    centers = [(edges[i] + edges[i+1]) / 2.0 for i in range(len(edges)-1)]
+    width = (edges[1]-edges[0]) * 0.9
     fig, ax = plt.subplots(figsize=(5.0, 3.1), dpi=110)
-    ax.bar(centers, neg[: len(centers)], width=width, alpha=0.6, label="negatives")
-    ax.bar(centers, pos[: len(centers)], width=width, alpha=0.6, label="positives")
+    ax.bar(centers, neg[: len(centers)], width=width, alpha=0.6, label="Uncertain")
+    ax.bar(centers, pos[: len(centers)], width=width, alpha=0.6, label="Near-duplicates")
     ax.set_xlabel(xlabel); ax.set_ylabel(ylabel); ax.set_title(title); ax.legend(); ax.grid(True, alpha=0.3)
     buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png"); plt.close(fig)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-# HTML / MD rendering
+# HTML/MD rendering
 def _render_html(
     run_id: int,
     started: Optional[str],
@@ -485,6 +719,7 @@ def _render_html(
     cal_table,
     run_table,
     per_learner_rows: List[List[str]],
+    basics: Dict[str, Dict[str, Any]],
     examples: Dict[str, List[Dict[str, Any]]],
     clusters: List[Dict[str, Any]],
     labels: Dict[str, str],
@@ -505,6 +740,13 @@ def _render_html(
       .pill { display: inline-block; padding: 2px 8px; border-radius: 9999px; background:#eef2ff; color:#3730a3; font-size:12px; }
       .muted { color:#6b7280; }
       img.chart { width: 100%; height: auto; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+      .learner-section { display:grid; grid-template-columns: minmax(260px, 360px) 1fr; gap:16px; align-items:start; margin-top:12px; }
+      .learner-col { min-width:0; }
+      .charts-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
+      .three-cols { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px; align-items:start; }
+      .charts-grid { display:grid; grid-template-columns: 1fr; gap:12px; }
+      .card { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:12px; }
+      .card h3 { margin-top:0; }
     </style>
     """
     header = f"<h1>Duplicate Detection Report — Run {run_id}</h1>"
@@ -519,24 +761,21 @@ def _render_html(
 
     # Per-learner metrics
     pl_headers = ["Learner", "N", "PosRate", "AUC", "Brier", "Threshold"]
-    pl_html = _table_html(pl_headers, per_learner_rows) if per_learner_rows else "<p class='muted'>No per-learner metrics.</p>"
+    pl_html = _table_html(pl_headers, per_learner_rows) if per_learner_rows else ""
+
+    basics_html = _basics_html(basics)
 
     # Calibration snapshot
-    cal_rows = []
-    for r in cal_table:
-        cal_rows.append([r["learner"], r["method"], r["threshold"], r["brier"], r["reliability"]])
-    cal_html = _table_html(["Learner", "Method", "Threshold", "Brier", "Reliability (center:obs(count))"], cal_rows)
+    cal_rows_render = []
+    for r in cal_table or []:
+        cal_rows_render.append([r.get("learner","-"), r.get("method","-"), r.get("threshold",""), r.get("brier",""), r.get("reliability","")])
+    cal_section_html = ""
+    if cal_rows_render:
+        cal_html = _table_html(["Learner", "Method", "Threshold", "Brier", "Reliability (center:obs(count))"], cal_rows_render)
+        cal_section_html = f"<h2>Calibration snapshot</h2>\n{cal_html}"
 
     # Charts
-    charts_html_parts = []
-    for learner, imgs in chart_imgs.items():
-        charts_html_parts.append(f"<h3>{_esc(learner.capitalize())}</h3>")
-        charts_html_parts.append("<div class='grid'>")
-        for key in ("reliability", "roc", "pr", "thr", "hist"):
-            if imgs.get(key):
-                charts_html_parts.append(f"<div><img class='chart' src='{imgs[key]}' alt='{learner} {key}'></div>")
-        charts_html_parts.append("</div>")
-    charts_html = "\n".join(charts_html_parts) or "<p class='muted'>Charts unavailable.</p>"
+    charts_html = _charts_inline_html(chart_imgs)
 
     # Examples
     ex_html = _examples_html(examples)
@@ -559,14 +798,15 @@ def _render_html(
 <h2>Run summary</h2>
 {run_table_html}
 
-<h2>Per-learner metrics</h2>
-{pl_html}
+{('<h2>Per-learner metrics</h2>' + pl_html) if pl_html else ''}
 
-<h2>Calibration snapshot</h2>
-{cal_html}
+<h2>Learner basics</h2>
+{_basics_inline_html(basics)}
 
 <h2>Charts</h2>
 {charts_html}
+
+{cal_section_html}
 
 <h2>Examples</h2>
 {ex_html}
@@ -618,10 +858,15 @@ def _render_markdown(
         )
     else:
         lines.append("_No per-learner metrics._")
-    lines.append("")
-    lines.append("## Calibration snapshot")
-    cal_rows = [[r["learner"], r["method"], str(r["threshold"]), str(r["brier"]), r["reliability"]] for r in cal_table]
-    lines.append(_table_md(["Learner", "Method", "Threshold", "Brier", "Reliability (center:obs(count))"], cal_rows))
+
+    # Calibration snapshot
+    cal_rows_md = [[r.get("learner","-"), r.get("method","-"), str(r.get("threshold","")), str(r.get("brier","")), r.get("reliability","")]
+                   for r in (cal_table or [])]
+    if cal_rows_md:
+        lines.append("")
+        lines.append("## Calibration snapshot")
+        lines.append(_table_md(["Learner", "Method", "Threshold", "Brier", "Reliability (center:obs(count))"], cal_rows_md))
+
     lines.append("")
     lines.append("## Examples")
     lines.extend(_examples_md(examples))
@@ -634,6 +879,7 @@ def _render_markdown(
     lines.append(cfg)
     lines.append("```")
     return "\n".join(lines)
+
 
 
 # HTML/MD section builders

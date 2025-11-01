@@ -153,7 +153,7 @@ class ProcessingService:
                             # Add PDF/DOCX metadata if available (optional, won't fail if import errors)
                             if ext in ['.pdf', '.docx']:
                                 try:
-                                    from src.pipelines.ingestion import extract_document
+                                    from src.utils.ingestion import extract_document
                                     result = extract_document(file_path)
                                     metadata = result.get('metadata', {})
                                     if metadata:
@@ -591,7 +591,7 @@ class ProcessingService:
             try:
                 # Try to import and use the ingestion pipeline
                 try:
-                    from src.pipelines.ingestion import extract_document
+                    from src.utils.ingestion import extract_document
                     result = extract_document(file_path)
                     return result.get('raw_text', '').strip()
                 except ImportError as import_err:

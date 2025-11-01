@@ -66,7 +66,7 @@ try:
     from src.pipelines import ingestion as _ingestion_mod
 except Exception:
     try:
-        import ingestion as _ingestion_mod
+        import src.ingestion as _ingestion_mod
     except Exception:
         _ingestion_mod = None
 
@@ -1542,10 +1542,10 @@ class App(tk.Tk):
                 doc_id,
                 raw_text,
                 norm,
-                json.dumps({
+                {
                     "language": meta.get("language"),
                     "filesize": meta.get("filesize") or 0,
-                }),
+                },
             )
 
             mapping_entry = (doc_id, abs_path, mtime_ns)

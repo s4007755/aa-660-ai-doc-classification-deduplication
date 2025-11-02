@@ -38,6 +38,12 @@ Built for day to day cleanup of messy document sets. Unsupervised by default, wi
 
   - Run History: notes, quick metrics, open HTML report
 
+  **Deduplication Dataset**
+
+  - Approximately 30,000 rows of completely randomised duplicate/near-duplicate rows each with varying differences in text for full deduplication analysis.
+  - Running import CSV via CLI will yield a random subset of selected rows depending on total number specified, giving variety to deduplication output.
+  - If static results need to be shown, delete all current documents first in the DB. Then, uncomment the unit_test function in app.py and call it above main(). Then, change the desired CSV scenario for path and run via python -m src.app 
+
 - **Reports**
 
   - Export a professional HTML report with config snapshot, calibration table, examples and clusters
@@ -113,6 +119,9 @@ python -m src.cli_nd list --max 50
 - `--preset` accepts: `balanced`, `high`, `recall`.
 - Reports are written under `reports/run_<RUN_ID>_<TIMESTAMP>.html`.
 - The CLI mirrors the GUI’s defaults; flags are optional in simple cases.
+- For deduplication, the default for running the algorithm found at ./dataset/Dataset.csv. 
+- Dataset.CSV is formatted into 4 columns for each row with the 'text' column being the column of analysis for deduplication. 
+- To ensure compatibility on other different CSV files, format them the same as Dataset.csv.
 
 ## CLI quick reference
 
@@ -165,7 +174,7 @@ dupfinder report 42 --out-dir ./reports
 dupfinder ingest ./docs # add files into DB (no run)
 dupfinder list --max 50 # preview what's inside
 dupfinder wipe --yes # irreversibly delete all documents
-dupfinder import-csv ./rows.csv --limit 2000
+dupfinder import-csv ./rows.csv --limit 2000 #placeholder file path, change to dataset\Dataset.csv for default dataset
 ```
 
 ### Performance & tuning (advanced)

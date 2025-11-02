@@ -1751,8 +1751,8 @@ def main():
     App().mainloop()
 
 
-# Import first 500 rows from a CSV file with text column field only
-def import_rows_from_csv(csv_path="dataset/True.csv"):
+# OLD IMPORT FUNCTION FOR IMPORTING CSV, CONSIDERED OBSOLETE SINCE CAN BE DONE VIA CLI COMMAND. IF WANT TO USE, SIMPLY CHANGE THE len(df) AND n VALUES TO SUIT NEEDS AND CALL THE FUNCTION ABOVE main(). THEN RUN python -m src.app TO SEE CHANGES
+def import_rows_from_csv(csv_path="dataset/Dataset.csv"):
     """
     Convenience utility to insert a randomized sample of CSV rows into the DB.
     """
@@ -1767,13 +1767,14 @@ def import_rows_from_csv(csv_path="dataset/True.csv"):
         print(f"Found columns: {df.columns.tolist()}")
         return
 
-    # Sample 1500 random rows
+    # Change here for total number of rows to sample
     if len(df) < 1500:
         print(f"CSV has only {len(df)} rows, sampling all available.")
         sampled_df = df.copy()
     else:
         sampled_df = df.sample(n=1500, random_state=random.randint(0, 9999))
 
+    # Change here for total number of duplicated rows from the sample rows
     duplicates = sampled_df.sample(n=500, replace=False, random_state=random.randint(0, 9999))
     combined_df = pd.concat([sampled_df, duplicates], ignore_index=True).sample(frac=1).reset_index(drop=True)
 
@@ -1804,6 +1805,55 @@ def import_rows_from_csv(csv_path="dataset/True.csv"):
         sqlite_store.add_file_mapping(doc_id, fake_path, mtime_ns)
 
     print("Imported 2000 CSV rows into database.")
+
+# UNIT TEST FUNCTION. CHANGE CSV PATH TO WHICHEVER SCENARIO IS NEEDED FOR TESTING PURPOSES. OTHERWISE DO NOT USE FOR REGULAR PROCESSING
+"""def unit_test(csv_path="dataset/Scenario1_ExactDuplicate.csv"):
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        return
+
+    if "text" not in df.columns:
+        print("❌ CSV must have a 'text' column.")
+        print(f"Found columns: {df.columns.tolist()}")
+        return
+
+    sqlite_store.init_db()
+    fake_path = os.path.abspath(csv_path)
+
+    imported_count = 0
+
+    for i, row in df.iterrows():
+        text = str(row.get("text", "")).strip()
+        if not text:
+            continue  # skip empty text entries
+
+        # Sequential doc_id (1-based)
+        doc_id = str(imported_count + 1)
+
+        norm = normalize_text(text)
+
+        meta = {
+            "language": "en",
+            "filesize": len(text.encode("utf-8")),
+        }
+
+        sqlite_store.upsert_document(
+            doc_id=doc_id,
+            raw_text=text,
+            normalized_text=norm,
+            meta=meta,
+        )
+
+        mtime_ns = time.time_ns()
+        sqlite_store.add_file_mapping(doc_id, fake_path, mtime_ns)
+
+        imported_count += 1
+
+    print(f"✅ Imported {imported_count} rows from CSV into database.")
+    """
 
 
 if __name__ == "__main__":

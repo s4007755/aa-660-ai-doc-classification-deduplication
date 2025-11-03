@@ -13,11 +13,10 @@ This module defines:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Literal, Optional, Protocol, Tuple, TypedDict, runtime_checkable
+from typing import Any, Dict, Iterable, List, Literal, Optional, Protocol, Tuple, TypedDict, runtime_checkable, Mapping, Tuple
 from datetime import datetime
 import math
 import json
-from typing import Mapping, Tuple
 from types import MappingProxyType
 
 

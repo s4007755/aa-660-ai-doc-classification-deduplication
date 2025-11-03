@@ -1,4 +1,8 @@
+## GitHub URL: https://github.com/s4007755/aa-660-ai-doc-classification-deduplication
+
 # AA-660 Doc AI
+
+# Document Deduplication README (Scroll down for Classification README)
 
 Document deduplication with a friendly Tkinter GUI, fast duplicate/near-duplicate detection (SimHash, MinHash, Embeddings), an arbiter/consensus layer, lightweight SQLite storage and a one-click HTML report.
 
@@ -300,3 +304,408 @@ src/
 ## Contributing
 
 See CONTRIBUTING.md for branch workflow, code style, testing and PR guidelines.
+
+
+---
+# Document Classification System README
+
+Complete guide for document classification, clustering, and querying using vector embeddings and AI-powered labels.
+
+## Overview
+
+The system provides two interfaces for managing document collections:
+
+- **CLI**: Interactive command-line interface for collection management, ingestion, clustering, and classification
+- **API Server**: REST API for programmatic access to collections, clusters, and labels
+
+## Prerequisites
+
+- **Python 3.8+**
+- **Docker** (for Qdrant vector database)
+- **OpenAI API Key** (for generating embeddings)
+
+## Installation
+
+### 1. Install Dependencies
+
+```bash
+pip install qdrant-client openai rich scikit-learn numpy fastapi uvicorn
+```
+
+Or from requirements:
+```bash
+pip install -r config/requirements.txt
+```
+
+### 2. Set Up Qdrant
+
+```bash
+# Quick start (in-memory)
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+
+# With persistent storage
+docker run -p 6333:6333 -p 6334:6334 \
+    -v $(pwd)/qdrant_storage:/qdrant/storage \
+    qdrant/qdrant
+```
+
+Or use Docker Compose:
+```yaml
+version: '3.8'
+services:
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+```
+
+### 3. Configure OpenAI API Key
+
+```bash
+# Linux/macOS
+export OPENAI_API_KEY="your-api-key-here"
+
+# Windows PowerShell
+$env:OPENAI_API_KEY="your-api-key-here"
+
+# Windows CMD
+set OPENAI_API_KEY=your-api-key-here
+```
+
+## Quick Start
+
+### CLI Usage
+
+```bash
+# Start CLI
+python -m src.pipelines.classification.cli
+
+# Basic workflow
+create news_articles --description "News articles"
+use news_articles
+source /path/to/documents
+cluster
+classify labels.json
+query label:Technology
+info
+```
+
+### API Server
+
+```bash
+# Start API server
+python api_server.py
+
+# Access points
+# - API: http://localhost:8000
+# - Swagger UI: http://localhost:8000/docs
+# - ReDoc: http://localhost:8000/redoc
+```
+
+## CLI Commands
+
+### Collection Management
+
+| Command | Description |
+|---------|-------------|
+| `create <name> [model] [--description "..."]` | Create collection (models: `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`) |
+| `use <collection>` | Select collection |
+| `ls` | List all collections |
+| `ls-models` | Show available embedding models |
+| `rm [collection] [--yes]` | Delete collection + dedup index |
+| `show` | Display connection status |
+
+### Data Ingestion
+
+```bash
+source <path> [--limit N] [--text-column COL] [--url-column COL]
+```
+
+**Supported sources:**
+- Directories (`.pdf`, `.docx`, `.txt`)
+- CSV files
+- URLs
+- Single files
+
+**Examples:**
+```bash
+source /path/to/documents
+source data.csv --text-column "content"
+source https://example.com/article.html --limit 100
+```
+
+### Clustering
+
+```bash
+cluster [--num-clusters N] [--debug]
+```
+
+**Modes:**
+- **Unsupervised** (default): Auto-determines clusters using Agglomerative Clustering
+- **K-means**: Specify number with `--num-clusters`
+
+**Features:**
+- AI-generated cluster names
+- Large datasets (>5000 docs) auto-switch to K-means
+
+### Classification
+
+```bash
+classify [labels.json] [--use-collection-labels] [--enrich]
+```
+
+**Label file format (`labels.json`):**
+```json
+{
+  "0": {"label": "Technology", "description": "Tech content"},
+  "1": {"label": "Sports", "description": "Sports news"}
+}
+```
+
+**Label management:**
+```bash
+add-label "Science" [--description "..."] [--enrich]
+rm-label <label_id|label_name> [--by id|name] [--yes]
+ls-labels
+```
+
+### Querying
+
+```bash
+query <query_term>
+```
+
+**Query types:**
+- `cluster:0` - Documents in cluster ID 0
+- `cluster:Technology` - Documents in cluster named "Technology"
+- `label:Sports` - Documents with label "Sports"
+- `<document_id>` - Specific document by ID
+- `<url>` - Document from URL
+
+### Statistics
+
+```bash
+info  # Collection statistics (clusters, labels, document types)
+```
+
+## API Endpoints
+
+### Collection Management
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/collections` | GET | List all collections with metadata |
+| `/collections/{name}/info` | GET | Get detailed collection information |
+
+### Document Queries
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/collections/{name}/points` | GET | Get all documents (supports `?limit=N&offset=N`) |
+| `/collections/{name}/points/{id}` | GET | Get specific document by ID |
+
+### Cluster Queries
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/collections/{name}/clusters` | GET | List all clusters with counts |
+| `/collections/{name}/clusters/{id}` | GET | Get documents in specific cluster |
+
+### Label Queries
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/collections/{name}/labels` | GET | List all labels with counts |
+| `/collections/{name}/labels/{label}` | GET | Get documents with specific label |
+
+**Query Parameters:**
+- `limit`: Max results (1-10000, default varies by endpoint)
+- `offset`/`page_offset`: Pagination
+- `use_cache`: Use cached metadata (default: true)
+
+### Example API Requests
+
+**Python:**
+```python
+import requests
+
+BASE_URL = "http://localhost:8000"
+COLLECTION = "my_collection"
+
+# List collections
+collections = requests.get(f"{BASE_URL}/collections").json()
+
+# Get clusters
+clusters = requests.get(f"{BASE_URL}/collections/{COLLECTION}/clusters").json()
+
+# Get documents by label
+docs = requests.get(
+    f"{BASE_URL}/collections/{COLLECTION}/labels/Technology",
+    params={"limit": 50}
+).json()
+```
+
+**cURL:**
+```bash
+# List collections
+curl http://localhost:8000/collections
+
+# Get collection info
+curl http://localhost:8000/collections/my_collection/info
+
+# Get documents in cluster
+curl "http://localhost:8000/collections/my_collection/clusters/0?limit=50"
+
+# Get documents by label
+curl "http://localhost:8000/collections/my_collection/labels/Technology?limit=100"
+```
+
+## Complete Workflow
+
+```bash
+# 1. Start CLI
+python -m src.pipelines.classification.cli
+
+# 2. Create collection
+create news_articles --description "News article classification"
+
+# 3. Select and ingest
+use news_articles
+source /path/to/news/articles
+
+# 4. Cluster documents
+cluster
+
+# 5. View clusters
+ls-clusters
+
+# 6. Create labels.json
+{
+  "0": {"label": "Politics", "description": "Political news"},
+  "1": {"label": "Sports", "description": "Sports news"},
+  "2": {"label": "Technology", "description": "Tech news"}
+}
+
+# 7. Classify
+classify labels.json
+
+# 8. View results
+ls-labels
+query label:Politics
+
+# 9. View statistics
+info
+
+# 10. Access via API
+# Start API server in another terminal
+python api_server.py
+# Then query via HTTP
+curl "http://localhost:8000/collections/news_articles/labels/Politics"
+```
+
+## Response Models
+
+### Point Response
+```json
+{
+  "id": 1,
+  "source": "/path/to/document.pdf",
+  "cluster_id": 0,
+  "cluster_name": "Technology",
+  "predicted_label": "Tech",
+  "confidence": 0.85,
+  "text_content": "Document preview..."
+}
+```
+
+### Collection Info
+```json
+{
+  "name": "my_collection",
+  "vector_count": 1500,
+  "dimension": 1536,
+  "distance_metric": "Cosine",
+  "embedding_model": "text-embedding-3-small",
+  "created_at": "2024-01-15T10:30:00",
+  "description": "My collection",
+  "clustering_algorithm": "kmeans",
+  "num_clusters": 5
+}
+```
+
+## Best Practices
+
+### Performance
+- Use `--limit` when testing on large datasets
+- For collections >5000 docs, K-means clustering is more efficient
+- Duplicate detection happens during ingestion
+
+### Classification
+- Provide clear, descriptive label names
+- Use `--enrich` to generate detailed descriptions automatically
+- Store labels in collection for reuse
+
+### Clustering
+- Start with unsupervised clustering to discover natural groupings
+- Use `--num-clusters` when you know expected categories
+
+### API Usage
+- Use pagination (`limit`) for large result sets
+- Enable caching (`use_cache=true`) when metadata summaries are available
+- Filter early using cluster/label endpoints rather than fetching all points
+
+## Troubleshooting
+
+### Connection Issues
+```bash
+# Check Qdrant
+curl http://localhost:6333/collections
+
+# CLI: Reconnect
+retry --host localhost --port 6333
+
+# API: Verify server
+curl http://localhost:8000/
+```
+
+### Common Issues
+- **OpenAI API Errors**: Verify `OPENAI_API_KEY` is set correctly
+- **Empty Collections**: Ensure documents were ingested (`info` command)
+- **No Clusters/Labels**: Run `cluster` or `classify` first
+- **Collection Not Found**: Collections are case-sensitive
+
+### File Formats
+- Supported: `.pdf`, `.docx`, `.txt`, CSV files
+
+## Features
+
+- **Automatic Duplicate Detection**: Hashed during ingestion
+- **Vector Storage**: Supports millions of documents per collection
+- **Metadata Caching**: Fast cluster/label summaries from metadata
+- **AI-Powered Naming**: Clusters automatically named using LLM
+- **Flexible Querying**: By cluster, label, URL, or document ID
+
+## Environment Variables
+
+- `OPENAI_API_KEY`: Required for generating embeddings
+
+## API Configuration
+
+**Standard startup:**
+```bash
+python api_server.py
+```
+Server starts on `http://localhost:8000` by default.
+
+**Start API server with custom settings:**
+```bash
+uvicorn api_server:app --host 0.0.0.0 --port 8080 --workers 1
+```
+
+**Interactive Documentation:**
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
+- OpenAPI Schema: http://localhost:8000/openapi.json
